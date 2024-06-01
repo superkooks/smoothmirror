@@ -17,8 +17,15 @@ use h264_reader::{
     nal::{Nal, RefNal},
     push::{AccumulatedNalHandler, NalAccumulator, NalInterest},
 };
+use serde::{Deserialize, Serialize};
 
-use crate::Msg;
+#[derive(Serialize, Deserialize)]
+struct Msg {
+    seq: u64,
+
+    #[serde(with = "serde_bytes")]
+    data: Vec<u8>,
+}
 
 struct Accumulator(Vec<Vec<u8>>);
 impl AccumulatedNalHandler for Accumulator {
@@ -27,6 +34,7 @@ impl AccumulatedNalHandler for Accumulator {
             return NalInterest::Buffer;
         }
 
+        println!("have complete nal");
         let mut nal_data = vec![0, 0, 0, 1];
         nal.reader().read_to_end(&mut nal_data).unwrap();
         self.0.push(nal_data);
@@ -171,6 +179,7 @@ impl Client {
     }
 
     async fn accumulate_nal(&mut self, msg: Msg) {
+        println!("accumulating nals");
         self.annexb.push(&msg.data);
 
         loop {
@@ -178,13 +187,15 @@ impl Client {
                 break;
             }
 
+            println!("about to consume nal");
             let nalu = self.annexb.nal_handler_mut().0.remove(0);
             self.consume_nal(&nalu).await;
         }
     }
 }
 
-pub async fn start_client() {
+#[tokio::main]
+async fn main() {
     let evl: EventLoop<ThreadUnsafe> = EventLoop::new();
     let target = evl.window_target().clone();
     evl.block_on(async move {
@@ -199,10 +210,10 @@ pub async fn start_client() {
 
         let mut c = init(&window).await;
 
-        let sock = UdpSocket::bind("localhost:0").unwrap();
-        sock.connect("localhost:42069").unwrap();
+        let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+        sock.connect("dw.superkooks.com:42069").unwrap();
 
-        sock.send(&vec![1u8]).unwrap();
+        sock.send(&vec![1]).unwrap();
 
         let mut next_seq = 0;
         let mut rearrange_buf = vec![];
@@ -214,12 +225,13 @@ pub async fn start_client() {
             sock.recv(&mut buf).unwrap();
             println!("definitely have packet");
 
-            if Instant::now().duration_since(last_in_seq).as_millis() > 100 {
-                next_seq += 1;
-            }
-
             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
             println!("got packet? {} (waiting for {})", msg.seq, next_seq);
+
+            if Instant::now().duration_since(last_in_seq).as_millis() > 100 {
+                next_seq = msg.seq;
+            }
+
             if msg.seq != next_seq {
                 // Add it to the rearrange buf
                 rearrange_buf.push(msg);
@@ -229,28 +241,28 @@ pub async fn start_client() {
                 c.accumulate_nal(msg).await;
                 next_seq += 1;
                 last_in_seq = Instant::now();
+            }
 
-                // Try flush the rearrange buf
-                println!("attempting to flush");
-                loop {
-                    let mut del_idx = -1;
-                    for (idx, m) in rearrange_buf.iter().enumerate() {
-                        if m.seq == next_seq {
-                            del_idx = idx as i32;
-                        }
-                    }
-
-                    if del_idx >= 0 {
-                        println!("flushing rearrange buf");
-                        c.accumulate_nal(rearrange_buf.remove(del_idx as usize))
-                            .await;
-                        next_seq += 1;
-                    } else {
-                        break;
+            // Try flush the rearrange buf
+            println!("attempting to flush");
+            loop {
+                let mut del_idx = -1;
+                for (idx, m) in rearrange_buf.iter().enumerate() {
+                    if m.seq == next_seq {
+                        del_idx = idx as i32;
                     }
                 }
-                println!("flush done");
+
+                if del_idx >= 0 {
+                    println!("flushing rearrange buf");
+                    c.accumulate_nal(rearrange_buf.remove(del_idx as usize))
+                        .await;
+                    next_seq += 1;
+                } else {
+                    break;
+                }
             }
+            println!("flush done");
         }
     });
 }

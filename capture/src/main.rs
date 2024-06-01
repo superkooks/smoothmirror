@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::os::fd::{FromRawFd, IntoRawFd};
+use std::time::Duration;
 
 use cudarc::driver::CudaDevice;
 use nvidia_video_codec_sdk::{
@@ -11,10 +12,21 @@ use nvidia_video_codec_sdk::{
 };
 use nvidia_video_codec_sdk::{Bitstream, Buffer, Session};
 
+use serde::{Deserialize, Serialize};
+use tokio::net::UdpSocket;
+use tokio::task;
 use x11rb::protocol::shm::ConnectionExt;
 use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{connection::Connection, protocol::xproto::ImageFormat};
+
+#[derive(Serialize, Deserialize)]
+struct Msg {
+    seq: u64,
+
+    #[serde(with = "serde_bytes")]
+    data: Vec<u8>,
+}
 
 pub struct Capturer {
     conn: RustConnection,
@@ -57,7 +69,7 @@ pub async fn new_encoder() -> Capturer {
     enc_conf.rcParams.lowDelayKeyFrameScale = 0;
     unsafe {
         enc_conf.encodeCodecConfig.h264Config.repeatSPSPPS();
-        // enc_conf.encodeCodecConfig.h264Config.idrPeriod = 256;
+        enc_conf.encodeCodecConfig.h264Config.idrPeriod = 128;
         // enc_conf.encodeCodecConfig.h264Config.sliceMode = 1;
         // enc_conf.encodeCodecConfig.h264Config.sliceModeData = 1300 - 28;
     };
@@ -136,4 +148,49 @@ impl Capturer {
 
         return nalus.data().to_vec();
     }
+}
+
+#[tokio::main]
+async fn main() {
+    let local = task::LocalSet::new();
+    local
+        .run_until(async move {
+            let mut enc = new_encoder().await;
+            let sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+            sock.connect("dw.superkooks.com:42069").await.unwrap();
+
+            sock.send(&vec![0]).await.unwrap();
+
+            println!("waiting for a display client");
+            let mut buf = vec![];
+            sock.recv(&mut buf).await.unwrap();
+            println!("got display client");
+
+            // Begin capturing
+            let mut cur_seq = 0u64;
+            let mut ticker = tokio::time::interval(Duration::from_micros(33_333));
+
+            loop {
+                println!("capturing...");
+                let nalus = enc.capture().await;
+                println!("captured image");
+
+                // Packetize the nalus into mtu sized blocks
+                let chunks: Vec<&[u8]> = nalus.chunks(1400).collect();
+                for chunk in chunks {
+                    let m = Msg {
+                        seq: cur_seq,
+                        data: chunk.into(),
+                    };
+                    cur_seq += 1;
+
+                    let buf = rmp_serde::to_vec(&m).unwrap();
+                    sock.send(&buf).await.unwrap();
+                    println!("sent packet");
+                }
+
+                ticker.tick().await;
+            }
+        })
+        .await;
 }
