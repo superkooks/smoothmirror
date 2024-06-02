@@ -246,6 +246,7 @@ name = "capture"
 version = "0.1.0"
 dependencies = [
  "cudarc",
+ "ffmpeg-next",
  "nvidia-video-codec-sdk",
  "rmp-serde",
  "serde",

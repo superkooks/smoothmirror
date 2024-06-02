@@ -19,13 +19,9 @@ fn main() {
         }
     }
 
-    // Begin capture
-    sock.send_to(&vec![1], capture.unwrap()).unwrap();
-
-    // Forward packets
-    loop {
-        let mut buf = vec![0; 2048];
-        sock.recv(&mut buf).unwrap();
-        sock.send_to(&buf, display.unwrap()).unwrap();
-    }
+    // Exchange addresses
+    sock.send_to(display.unwrap().to_string().as_bytes(), capture.unwrap())
+        .unwrap();
+    sock.send_to(capture.unwrap().to_string().as_bytes(), display.unwrap())
+        .unwrap();
 }

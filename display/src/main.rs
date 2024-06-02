@@ -1,4 +1,8 @@
-use std::{io::Read, net::UdpSocket, time::Instant};
+use std::{
+    io::Read,
+    net::UdpSocket,
+    time::{Duration, Instant},
+};
 
 use async_winit::{
     dpi::{PhysicalSize, Size},
@@ -18,6 +22,10 @@ use h264_reader::{
     push::{AccumulatedNalHandler, NalAccumulator, NalInterest},
 };
 use serde::{Deserialize, Serialize};
+
+const ENCODED_WIDTH: u32 = 1920;
+const ENCODED_HEIGHT: u32 = 1080;
+const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 
 #[derive(Serialize, Deserialize)]
 struct Msg {
@@ -112,11 +120,11 @@ async fn init(window: &Window<ThreadUnsafe>) -> Client {
 
     let scaler = scaling::Context::get(
         Pixel::YUV420P,
-        2560,
-        1440,
+        ENCODED_WIDTH,
+        ENCODED_HEIGHT,
         Pixel::BGRA,
-        2560,
-        1440,
+        ENCODED_WIDTH,
+        ENCODED_HEIGHT,
         Flags::empty(),
     )
     .unwrap();
@@ -161,12 +169,12 @@ impl Client {
                 &rgb_frame.data(0),
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * 2560),
-                    rows_per_image: Some(1440),
+                    bytes_per_row: Some(4 * ENCODED_WIDTH),
+                    rows_per_image: Some(ENCODED_HEIGHT),
                 },
                 wgpu::Extent3d {
-                    width: 2560,
-                    height: 1440,
+                    width: ENCODED_WIDTH,
+                    height: ENCODED_HEIGHT,
                     depth_or_array_layers: 1,
                 },
             );
@@ -203,17 +211,22 @@ async fn main() {
         let window = Window::new().await.unwrap();
         window
             .set_inner_size(Size::Physical(PhysicalSize {
-                width: 2560,
-                height: 1440,
+                width: ENCODED_WIDTH,
+                height: ENCODED_HEIGHT,
             }))
             .await;
 
         let mut c = init(&window).await;
 
         let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
-        sock.connect("dw.superkooks.com:42069").unwrap();
+        sock.connect("10.8.0.1:42069").unwrap();
 
         sock.send(&vec![1]).unwrap();
+
+        let mut buf = vec![0; 2048];
+        let recv_bytes = sock.recv(&mut buf).unwrap();
+        sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
+            .unwrap();
 
         let mut next_seq = 0;
         let mut rearrange_buf = vec![];
@@ -228,8 +241,11 @@ async fn main() {
             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
             println!("got packet? {} (waiting for {})", msg.seq, next_seq);
 
-            if Instant::now().duration_since(last_in_seq).as_millis() > 100 {
-                next_seq = msg.seq;
+            if Instant::now().duration_since(last_in_seq).as_micros()
+                > FRAME_DURATION.as_micros() * 2
+                && msg.seq - next_seq > 1
+            {
+                next_seq += 2;
             }
 
             if msg.seq != next_seq {
