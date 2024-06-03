@@ -279,7 +279,7 @@ impl Capturer {
         let peek_res = self.audio_stream.borrow_mut().peek().unwrap();
         match peek_res {
             PeekResult::Data(data) => {
-                println!("got buffer data len {}", data.len());
+                // println!("got buffer data len {}", data.len());
                 self.audio_stream.borrow_mut().discard().unwrap();
 
                 // Encode in batches of 20ms
@@ -308,16 +308,12 @@ impl Capturer {
 fn main() {
     let mut enc = new_encoder();
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
-    sock.connect("10.8.0.1:42069").unwrap();
-
+    sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![0]).unwrap();
+    sock.recv(&mut vec![]).unwrap();
 
     println!("waiting for a display client");
-    let mut buf = vec![0; 2048];
-    let recv_bytes = sock.recv(&mut buf).unwrap();
-    sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
-        .unwrap();
-    let mut tcp_sock = TcpStream::connect("10.8.0.1:42069").unwrap();
+    let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
 
     // Forward keyboard events to application
     thread::spawn(move || {

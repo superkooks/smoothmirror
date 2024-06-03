@@ -336,15 +336,11 @@ async fn run() {
     let mut c = init(&window, decoded_audio).await;
 
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
-    sock.connect("10.8.0.1:42069").unwrap();
-
+    sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![1]).unwrap();
+    sock.recv(&mut vec![]).unwrap();
 
-    let mut buf = vec![0; 2048];
-    let recv_bytes = sock.recv(&mut buf).unwrap();
-    sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
-        .unwrap();
-    let mut tcp_sock = TcpStream::connect("10.8.0.1:42069").unwrap();
+    let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
 
     let mut video_stream = UdpStream::new();
 

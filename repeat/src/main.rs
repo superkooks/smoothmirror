@@ -23,21 +23,35 @@ fn main() {
         }
     }
 
-    // Exchange addresses
-    sock.send_to(display.unwrap().to_string().as_bytes(), capture.unwrap())
-        .unwrap();
-    sock.send_to(capture.unwrap().to_string().as_bytes(), display.unwrap())
-        .unwrap();
+    // Send confirmation
+    sock.send_to(&vec![1], capture.unwrap()).unwrap();
+    sock.send_to(&vec![1], display.unwrap()).unwrap();
 
-    // Accept tcp connections
-    println!("will accept");
-    let mut client1 = tcp_sock.accept().unwrap();
-    let mut client2 = tcp_sock.accept().unwrap();
-    println!("accepted");
+    // Accept and copy tcp connections
+    thread::spawn(move || {
+        println!("will accept");
+        let mut client1 = tcp_sock.accept().unwrap();
+        let mut client2 = tcp_sock.accept().unwrap();
+        println!("accepted");
 
-    let mut client12 = client1.0.try_clone().unwrap();
-    let mut client22 = client2.0.try_clone().unwrap();
+        let mut client12 = client1.0.try_clone().unwrap();
+        let mut client22 = client2.0.try_clone().unwrap();
 
-    thread::spawn(move || copy(&mut client12, &mut client22).unwrap());
-    copy(&mut client2.0, &mut client1.0).unwrap();
+        thread::spawn(move || copy(&mut client12, &mut client22).unwrap());
+        copy(&mut client2.0, &mut client1.0).unwrap();
+    });
+
+    // Transfer between udp connections
+    loop {
+        let mut buf = vec![0; 2048];
+        let (size, from) = sock.recv_from(&mut buf).unwrap();
+
+        if from == display.unwrap() {
+            sock.send_to(&buf[..size], capture.unwrap()).unwrap();
+        } else if from == capture.unwrap() {
+            sock.send_to(&buf[..size], display.unwrap()).unwrap();
+        } else {
+            println!("received packet from unknown host")
+        }
+    }
 }
