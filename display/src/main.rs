@@ -338,7 +338,7 @@ async fn run() {
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
     sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![1]).unwrap();
-    sock.recv(&mut vec![]).unwrap();
+    sock.recv(&mut vec![0]).unwrap();
 
     let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
 
