@@ -1,6 +1,8 @@
 use std::{
     io::Read,
     net::UdpSocket,
+    sync::{Arc, Mutex},
+    thread::sleep,
     time::{Duration, Instant},
 };
 
@@ -9,6 +11,11 @@ use async_winit::{
     event_loop::EventLoop,
     window::Window,
     ThreadUnsafe,
+};
+use audiopus::{packet::Packet, MutSignals};
+use cpal::{
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    Sample, SampleRate, StreamConfig,
 };
 use ffmpeg_next::{
     codec, decoder,
@@ -30,6 +37,7 @@ const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 #[derive(Serialize, Deserialize)]
 struct Msg {
     seq: u64,
+    is_audio: bool,
 
     #[serde(with = "serde_bytes")]
     data: Vec<u8>,
@@ -42,7 +50,7 @@ impl AccumulatedNalHandler for Accumulator {
             return NalInterest::Buffer;
         }
 
-        println!("have complete nal");
+        // println!("have complete nal");
         let mut nal_data = vec![0, 0, 0, 1];
         nal.reader().read_to_end(&mut nal_data).unwrap();
         self.0.push(nal_data);
@@ -56,9 +64,12 @@ struct Client {
     surface: wgpu::Surface,
     scaler: scaling::Context,
     annexb: h264_reader::annexb::AnnexBReader<NalAccumulator<Accumulator>>,
+
+    audio_decoder: audiopus::coder::Decoder,
+    decoded_audio: Arc<Mutex<Vec<f32>>>,
 }
 
-async fn init(window: &Window<ThreadUnsafe>) -> Client {
+async fn init(window: &Window<ThreadUnsafe>, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
     // Init graphics
     let size = window.inner_size().await;
 
@@ -109,6 +120,12 @@ async fn init(window: &Window<ThreadUnsafe>) -> Client {
 
     surface.configure(&device, &config);
 
+    println!(
+        "texture has width {:?} for screen width {:?}",
+        surface.get_current_texture().unwrap().texture.width(),
+        size.width
+    );
+
     // Create decoder
     ffmpeg_next::init().unwrap();
 
@@ -129,12 +146,20 @@ async fn init(window: &Window<ThreadUnsafe>) -> Client {
     )
     .unwrap();
 
+    // Create audio stream
+
     Client {
         queue,
         decoder,
         surface,
         scaler,
         annexb: AnnexBReader::accumulate(Accumulator(vec![])),
+        audio_decoder: audiopus::coder::Decoder::new(
+            audiopus::SampleRate::Hz48000,
+            audiopus::Channels::Stereo,
+        )
+        .unwrap(),
+        decoded_audio,
     }
 }
 
@@ -142,20 +167,20 @@ impl Client {
     async fn consume_nal(&mut self, nal: &[u8]) {
         let mut t = Instant::now();
         let res = self.decoder.send_packet(&ffmpeg_next::Packet::copy(nal));
-        println!(
-            "took {} us to decode",
-            Instant::now().duration_since(t).as_micros()
-        );
+        // println!(
+        //     "took {} us to decode",
+        //     Instant::now().duration_since(t).as_micros()
+        // );
         t = Instant::now();
 
         let mut frame = Video::empty();
         if res.is_ok() && self.decoder.receive_frame(&mut frame).is_ok() {
             let mut rgb_frame = Video::empty();
             self.scaler.run(&frame, &mut rgb_frame).unwrap();
-            println!(
-                "took {} us to convert",
-                Instant::now().duration_since(t).as_micros()
-            );
+            // println!(
+            //     "took {} us to convert",
+            //     Instant::now().duration_since(t).as_micros()
+            // );
 
             let output = self.surface.get_current_texture().unwrap();
 
@@ -182,12 +207,12 @@ impl Client {
             self.queue.submit(std::iter::empty());
             output.present();
 
-            println!("presenting")
+            // println!("presenting")
         }
     }
 
     async fn accumulate_nal(&mut self, msg: Msg) {
-        println!("accumulating nals");
+        // println!("accumulating nals");
         self.annexb.push(&msg.data);
 
         loop {
@@ -195,15 +220,101 @@ impl Client {
                 break;
             }
 
-            println!("about to consume nal");
+            // println!("about to consume nal");
             let nalu = self.annexb.nal_handler_mut().0.remove(0);
             self.consume_nal(&nalu).await;
         }
     }
 }
 
-#[tokio::main]
-async fn main() {
+struct UdpStream {
+    next_seq: u64,
+    last_in_seq: Instant,
+    rearrange_buf: Vec<Msg>,
+}
+
+impl UdpStream {
+    fn new() -> Self {
+        return Self {
+            next_seq: 0,
+            last_in_seq: Instant::now(),
+            rearrange_buf: vec![],
+        };
+    }
+
+    fn recv(&mut self, msg: Msg) -> Vec<Msg> {
+        let mut out = vec![];
+
+        if Instant::now().duration_since(self.last_in_seq).as_micros()
+            > FRAME_DURATION.as_micros() * 2
+            && msg.seq - self.next_seq > 1
+        {
+            self.next_seq += 2;
+        }
+
+        if msg.seq != self.next_seq {
+            // Add it to the rearrange buf
+            self.rearrange_buf.push(msg);
+            println!("storing packet in rearrange buf")
+        } else {
+            // Write it
+            out.push(msg);
+            self.next_seq += 1;
+            self.last_in_seq = Instant::now();
+        }
+
+        // Try flush the rearrange buf
+        loop {
+            let mut del_idx = -1;
+            for (idx, m) in self.rearrange_buf.iter().enumerate() {
+                if m.seq == self.next_seq {
+                    del_idx = idx as i32;
+                }
+            }
+
+            if del_idx >= 0 {
+                out.push(self.rearrange_buf.remove(del_idx as usize));
+                self.next_seq += 1;
+            } else {
+                break;
+            }
+        }
+
+        out
+    }
+}
+
+fn main() {
+    // Create audio stream on main thread
+    let host = cpal::default_host();
+    let device = host.default_output_device().unwrap();
+    let decoded_audio = Arc::new(Mutex::new(vec![]));
+    let decoded_audio_cb = decoded_audio.clone();
+
+    let stream = device
+        .build_output_stream(
+            &StreamConfig {
+                sample_rate: SampleRate(48000),
+                channels: 2,
+                buffer_size: cpal::BufferSize::Default,
+            },
+            move |data: &mut [f32], &_| {
+                if decoded_audio_cb.lock().unwrap().len() >= data.len() {
+                    data.copy_from_slice(&decoded_audio_cb.lock().unwrap()[0..data.len()]);
+                    decoded_audio_cb.lock().unwrap().drain(0..data.len());
+                } else {
+                    data.fill(Sample::EQUILIBRIUM);
+                }
+            },
+            move |err| {
+                panic!("{}", err);
+            },
+            None,
+        )
+        .unwrap();
+
+    stream.play().unwrap();
+
     let evl: EventLoop<ThreadUnsafe> = EventLoop::new();
     let target = evl.window_target().clone();
     evl.block_on(async move {
@@ -215,8 +326,9 @@ async fn main() {
                 height: ENCODED_HEIGHT,
             }))
             .await;
+        sleep(Duration::from_millis(100));
 
-        let mut c = init(&window).await;
+        let mut c = init(&window, decoded_audio).await;
 
         let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
         sock.connect("10.8.0.1:42069").unwrap();
@@ -228,57 +340,38 @@ async fn main() {
         sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
             .unwrap();
 
-        let mut next_seq = 0;
-        let mut rearrange_buf = vec![];
-        let mut last_in_seq = Instant::now();
+        let mut video_stream = UdpStream::new();
+        let mut audio_stream = UdpStream::new();
+
+        let mut last_audio = Instant::now();
 
         loop {
             let mut buf = vec![0; 2048];
-            println!("waiting packet");
             sock.recv(&mut buf).unwrap();
-            println!("definitely have packet");
 
             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
-            println!("got packet? {} (waiting for {})", msg.seq, next_seq);
-
-            if Instant::now().duration_since(last_in_seq).as_micros()
-                > FRAME_DURATION.as_micros() * 2
-                && msg.seq - next_seq > 1
-            {
-                next_seq += 2;
-            }
-
-            if msg.seq != next_seq {
-                // Add it to the rearrange buf
-                rearrange_buf.push(msg);
-                println!("storing packet in rearrange buf")
+            if msg.is_audio {
+                for msg in audio_stream.recv(msg) {
+                    let mut output = vec![0f32; 1920 * 4];
+                    c.audio_decoder
+                        .decode_float(
+                            Some(Packet::try_from(&msg.data).unwrap()),
+                            MutSignals::try_from(&mut output).unwrap(),
+                            false,
+                        )
+                        .unwrap();
+                    // println!(
+                    //     "last audio {} us ago",
+                    //     Instant::now().duration_since(last_audio).as_micros()
+                    // );
+                    last_audio = Instant::now();
+                    c.decoded_audio.lock().unwrap().extend_from_slice(&output);
+                }
             } else {
-                // Write it
-                c.accumulate_nal(msg).await;
-                next_seq += 1;
-                last_in_seq = Instant::now();
-            }
-
-            // Try flush the rearrange buf
-            println!("attempting to flush");
-            loop {
-                let mut del_idx = -1;
-                for (idx, m) in rearrange_buf.iter().enumerate() {
-                    if m.seq == next_seq {
-                        del_idx = idx as i32;
-                    }
-                }
-
-                if del_idx >= 0 {
-                    println!("flushing rearrange buf");
-                    c.accumulate_nal(rearrange_buf.remove(del_idx as usize))
-                        .await;
-                    next_seq += 1;
-                } else {
-                    break;
+                for msg in video_stream.recv(msg) {
+                    c.accumulate_nal(msg).await;
                 }
             }
-            println!("flush done");
         }
     });
 }

@@ -1,6 +1,14 @@
+#![feature(thread_sleep_until)]
+
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Seek};
+use std::mem::transmute;
+use std::net::UdpSocket;
+use std::ops::Deref;
 use std::os::fd::{FromRawFd, IntoRawFd};
+use std::rc::Rc;
+use std::thread::{sleep, sleep_until};
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaDevice;
@@ -15,10 +23,10 @@ use nvidia_video_codec_sdk::{
 };
 use nvidia_video_codec_sdk::{Bitstream, Buffer, Session};
 
+use pulse::def::BufferAttr;
+use pulse::mainloop::standard::IterateResult;
+use pulse::stream::PeekResult;
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
-use tokio::task;
-use tokio::time::sleep;
 use x11rb::protocol::shm::ConnectionExt;
 use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
@@ -32,13 +40,14 @@ const FRAME_RATE: u32 = 60;
 #[derive(Serialize, Deserialize)]
 struct Msg {
     seq: u64,
+    is_audio: bool,
 
     #[serde(with = "serde_bytes")]
     data: Vec<u8>,
 }
 
 pub struct Capturer {
-    conn: RustConnection,
+    xconn: RustConnection,
     session: &'static Session,
     screen: Screen,
     scaler: scaling::Context,
@@ -48,16 +57,21 @@ pub struct Capturer {
 
     in_buf: Option<Buffer<'static>>,
     out_bits: Option<Bitstream<'static>>,
+
+    audio_stream: Rc<RefCell<pulse::stream::Stream>>,
+    audio_loop: Rc<RefCell<pulse::mainloop::standard::Mainloop>>,
+    audio_ctx: Rc<RefCell<pulse::context::Context>>,
+    audio_encoder: audiopus::coder::Encoder,
 }
 
-pub async fn new_encoder() -> Capturer {
+pub fn new_encoder() -> Capturer {
     println!("capture starting");
 
-    let (conn, screen_num) = x11rb::connect(None).unwrap();
-    let screen = conn.setup().roots[screen_num].clone();
+    let (xconn, screen_num) = x11rb::connect(None).unwrap();
+    let screen = xconn.setup().roots[screen_num].clone();
 
-    let shm_seg = conn.generate_id().unwrap();
-    let shm_reply = conn
+    let shm_seg = xconn.generate_id().unwrap();
+    let shm_reply = xconn
         .shm_create_segment(shm_seg, 2560 * 1440 * 4, false)
         .unwrap()
         .reply()
@@ -101,8 +115,68 @@ pub async fn new_encoder() -> Capturer {
 
     let sess = Box::leak(Box::new(session));
 
+    let spec = pulse::sample::Spec {
+        format: pulse::sample::Format::F32le,
+        channels: 2,
+        rate: 48000,
+    };
+    assert!(spec.is_valid());
+
+    let ml = Rc::new(RefCell::new(
+        pulse::mainloop::standard::Mainloop::new().unwrap(),
+    ));
+
+    let ctx = Rc::new(RefCell::new(
+        pulse::context::Context::new(ml.borrow().deref(), "prospectivegopher").unwrap(),
+    ));
+    ctx.borrow_mut()
+        .connect(None, pulse::context::FlagSet::empty(), None)
+        .unwrap();
+    loop {
+        match ml.borrow_mut().iterate(false) {
+            IterateResult::Quit(_) | IterateResult::Err(_) => panic!("ahhhhh"),
+            IterateResult::Success(_) => {}
+        }
+        match ctx.borrow().get_state() {
+            pulse::context::State::Ready => break,
+            pulse::context::State::Failed | pulse::context::State::Terminated => {
+                panic!("ahhhh (2)")
+            }
+            _ => {}
+        }
+    }
+
+    let stream = Rc::new(RefCell::new(
+        pulse::stream::Stream::new(&mut ctx.borrow_mut(), "desktop audio", &spec, None).unwrap(),
+    ));
+    stream
+        .borrow_mut()
+        .connect_record(
+            Some("input.sink1.monitor"),
+            Some(&BufferAttr {
+                maxlength: 7680 * 8,
+                tlength: u32::MAX,
+                prebuf: u32::MAX,
+                minreq: u32::MAX,
+                fragsize: 7680 * 4,
+            }),
+            pulse::stream::FlagSet::START_CORKED | pulse::stream::FlagSet::ADJUST_LATENCY,
+        )
+        .unwrap();
+    loop {
+        match ml.borrow_mut().iterate(false) {
+            IterateResult::Quit(_) | IterateResult::Err(_) => panic!("ahhhhh"),
+            IterateResult::Success(_) => {}
+        }
+        match stream.borrow().get_state() {
+            pulse::stream::State::Ready => break,
+            pulse::stream::State::Failed | pulse::stream::State::Terminated => panic!("ahhhh"),
+            _ => {}
+        }
+    }
+
     let mut e = Capturer {
-        conn,
+        xconn,
         session: sess,
         screen,
         shm_buf,
@@ -119,22 +193,27 @@ pub async fn new_encoder() -> Capturer {
             Flags::FAST_BILINEAR,
         )
         .unwrap(),
+        audio_stream: stream,
+        audio_loop: ml,
+        audio_ctx: ctx,
+        audio_encoder: audiopus::coder::Encoder::new(
+            audiopus::SampleRate::Hz48000,
+            audiopus::Channels::Stereo,
+            audiopus::Application::Audio,
+        )
+        .unwrap(),
     };
 
     e.in_buf = Some(sess.create_input_buffer().unwrap());
     e.out_bits = Some(sess.create_output_bitstream().unwrap());
 
-    // println!("waiting on ready");
-    // ready.notified().await;
-    // println!("running now");
-
     e
 }
 
 impl Capturer {
-    pub async fn capture(&mut self) -> Vec<u8> {
+    pub fn capture_frame(&mut self) -> Vec<u8> {
         // Capture screen from x11, using shared memory
-        self.conn
+        self.xconn
             .shm_get_image(
                 self.screen.root,
                 3840,
@@ -181,59 +260,115 @@ impl Capturer {
 
         return nalus.data().to_vec();
     }
+
+    pub fn capture_audio(&mut self) -> Vec<u8> {
+        match self.audio_loop.borrow_mut().iterate(false) {
+            IterateResult::Quit(_) | IterateResult::Err(_) => {
+                eprintln!("Iterate state was not success, quitting...");
+                return vec![];
+            }
+            IterateResult::Success(_) => {}
+        }
+
+        let peek_res = self.audio_stream.borrow_mut().peek().unwrap();
+        match peek_res {
+            PeekResult::Data(data) => {
+                println!("got buffer data len {}", data.len());
+                self.audio_stream.borrow_mut().discard().unwrap();
+
+                // Encode in batches of 20ms
+                let (prefix, floats, suffix) = unsafe { data.align_to::<f32>() };
+                assert!(prefix.len() == 0 && suffix.len() == 0);
+
+                let mut encoded = vec![0; 1400];
+
+                let count = self
+                    .audio_encoder
+                    .encode_float(&floats, &mut encoded)
+                    .unwrap();
+
+                encoded.truncate(count);
+
+                return encoded;
+            }
+            PeekResult::Empty => {}
+            PeekResult::Hole(_) => self.audio_stream.borrow_mut().discard().unwrap(),
+        };
+
+        vec![]
+    }
 }
 
-#[tokio::main]
-async fn main() {
-    let local = task::LocalSet::new();
-    local
-        .run_until(async move {
-            let mut enc = new_encoder().await;
-            let sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-            sock.connect("10.8.0.1:42069").await.unwrap();
+fn main() {
+    let mut enc = new_encoder();
+    let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+    sock.connect("10.8.0.1:42069").unwrap();
 
-            sock.send(&vec![0]).await.unwrap();
+    sock.send(&vec![0]).unwrap();
 
-            println!("waiting for a display client");
-            let mut buf = vec![];
-            sock.recv_buf(&mut buf).await.unwrap();
-            sock.connect(std::str::from_utf8(&buf).unwrap())
-                .await
-                .unwrap();
+    println!("waiting for a display client");
+    let mut buf = vec![0; 2048];
+    let recv_bytes = sock.recv(&mut buf).unwrap();
+    sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
+        .unwrap();
 
-            sleep(Duration::from_millis(100)).await;
-            println!("got display client");
+    sleep(Duration::from_millis(100));
+    println!("got display client");
 
-            // Begin capturing
-            let mut cur_seq = 0u64;
-            let mut ticker = tokio::time::interval(FRAME_DURATION);
+    // Begin capturing
+    let mut cur_seq_video = 0u64;
+    let mut cur_seq_audio = 0u64;
+    enc.audio_stream.borrow_mut().uncork(None);
+    let mut last_audio = Instant::now();
 
-            loop {
-                println!("capturing...");
-                let mut t = Instant::now();
-                let nalus = enc.capture().await;
-                println!(
-                    "captured image after {} us",
-                    Instant::now().duration_since(t).as_micros()
-                );
-                t = Instant::now();
+    loop {
+        let loop_start = Instant::now();
 
-                // Packetize the nalus into mtu sized blocks
-                let chunks: Vec<&[u8]> = nalus.chunks(1400).collect();
-                for chunk in chunks {
-                    let m = Msg {
-                        seq: cur_seq,
-                        data: chunk.into(),
-                    };
-                    cur_seq += 1;
+        // Video
+        println!("capturing...");
+        let mut t = Instant::now();
+        let nalus = enc.capture_frame();
+        println!(
+            "captured image after {} us",
+            Instant::now().duration_since(t).as_micros()
+        );
+        t = Instant::now();
 
-                    let buf = rmp_serde::to_vec(&m).unwrap();
-                    sock.send(&buf).await.unwrap();
-                    println!("sent packet");
-                }
+        // Packetize the nalus into mtu sized blocks
+        let chunks: Vec<&[u8]> = nalus.chunks(1400).collect();
+        for chunk in chunks {
+            let m = Msg {
+                seq: cur_seq_video,
+                is_audio: false,
+                data: chunk.into(),
+            };
+            cur_seq_video += 1;
 
-                ticker.tick().await;
-            }
-        })
-        .await;
+            let buf = rmp_serde::to_vec(&m).unwrap();
+            sock.send(&buf).unwrap();
+            println!("sent video packet");
+        }
+
+        // Audio
+        let packet = enc.capture_audio();
+        if !packet.is_empty() {
+            let m = Msg {
+                seq: cur_seq_audio,
+                is_audio: true,
+                data: packet,
+            };
+            cur_seq_audio += 1;
+
+            let buf = rmp_serde::to_vec(&m).unwrap();
+            sock.send(&buf).unwrap();
+            println!("sent audio packet");
+            println!(
+                "last audio {} us ago",
+                Instant::now().duration_since(last_audio).as_micros()
+            );
+            last_audio = Instant::now();
+        }
+
+        sleep_until(loop_start + FRAME_DURATION);
+    }
 }
