@@ -1,7 +1,11 @@
+use std::io::copy;
+use std::net::TcpListener;
 use std::net::UdpSocket;
+use std::thread;
 
 fn main() {
     let sock = UdpSocket::bind("0.0.0.0:42069").unwrap();
+    let tcp_sock = TcpListener::bind("0.0.0.0:42069").unwrap();
 
     let mut display = None;
     let mut capture = None;
@@ -24,4 +28,16 @@ fn main() {
         .unwrap();
     sock.send_to(capture.unwrap().to_string().as_bytes(), display.unwrap())
         .unwrap();
+
+    // Accept tcp connections
+    println!("will accept");
+    let mut client1 = tcp_sock.accept().unwrap();
+    let mut client2 = tcp_sock.accept().unwrap();
+    println!("accepted");
+
+    let mut client12 = client1.0.try_clone().unwrap();
+    let mut client22 = client2.0.try_clone().unwrap();
+
+    thread::spawn(move || copy(&mut client12, &mut client22).unwrap());
+    copy(&mut client2.0, &mut client1.0).unwrap();
 }

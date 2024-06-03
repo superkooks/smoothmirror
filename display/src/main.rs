@@ -1,17 +1,11 @@
 use std::{
-    io::Read,
-    net::UdpSocket,
+    io::{Read, Write},
+    net::{TcpStream, UdpSocket},
     sync::{Arc, Mutex},
-    thread::sleep,
     time::{Duration, Instant},
 };
 
-use async_winit::{
-    dpi::{PhysicalSize, Size},
-    event_loop::EventLoop,
-    window::Window,
-    ThreadUnsafe,
-};
+use async_std::task::sleep;
 use audiopus::{packet::Packet, MutSignals};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -29,6 +23,13 @@ use h264_reader::{
     push::{AccumulatedNalHandler, NalAccumulator, NalInterest},
 };
 use serde::{Deserialize, Serialize};
+use winit::{
+    dpi::{PhysicalSize, Size},
+    event::{Event, WindowEvent},
+    event_loop::EventLoop,
+    platform::scancode::PhysicalKeyExtScancode,
+    window::{Window, WindowBuilder},
+};
 
 const ENCODED_WIDTH: u32 = 1920;
 const ENCODED_HEIGHT: u32 = 1080;
@@ -41,6 +42,12 @@ struct Msg {
 
     #[serde(with = "serde_bytes")]
     data: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyEvent {
+    letter: char,
+    state: bool,
 }
 
 struct Accumulator(Vec<Vec<u8>>);
@@ -69,9 +76,9 @@ struct Client {
     decoded_audio: Arc<Mutex<Vec<f32>>>,
 }
 
-async fn init(window: &Window<ThreadUnsafe>, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
+async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
     // Init graphics
-    let size = window.inner_size().await;
+    let size = window.inner_size();
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
 
@@ -164,7 +171,7 @@ async fn init(window: &Window<ThreadUnsafe>, decoded_audio: Arc<Mutex<Vec<f32>>>
 }
 
 impl Client {
-    async fn consume_nal(&mut self, nal: &[u8]) {
+    fn consume_nal(&mut self, nal: &[u8]) {
         let mut t = Instant::now();
         let res = self.decoder.send_packet(&ffmpeg_next::Packet::copy(nal));
         // println!(
@@ -211,7 +218,7 @@ impl Client {
         }
     }
 
-    async fn accumulate_nal(&mut self, msg: Msg) {
+    fn accumulate_nal(&mut self, msg: Msg) {
         // println!("accumulating nals");
         self.annexb.push(&msg.data);
 
@@ -222,7 +229,7 @@ impl Client {
 
             // println!("about to consume nal");
             let nalu = self.annexb.nal_handler_mut().0.remove(0);
-            self.consume_nal(&nalu).await;
+            self.consume_nal(&nalu);
         }
     }
 }
@@ -284,7 +291,7 @@ impl UdpStream {
     }
 }
 
-fn main() {
+async fn run() {
     // Create audio stream on main thread
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
@@ -315,63 +322,114 @@ fn main() {
 
     stream.play().unwrap();
 
-    let evl: EventLoop<ThreadUnsafe> = EventLoop::new();
-    let target = evl.window_target().clone();
-    evl.block_on(async move {
-        target.resumed().await;
-        let window = Window::new().await.unwrap();
-        window
-            .set_inner_size(Size::Physical(PhysicalSize {
-                width: ENCODED_WIDTH,
-                height: ENCODED_HEIGHT,
-            }))
-            .await;
-        sleep(Duration::from_millis(100));
+    // Create window
+    let event_loop = EventLoop::new().unwrap();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
 
-        let mut c = init(&window, decoded_audio).await;
+    let _ = window.request_inner_size(Size::Physical(PhysicalSize {
+        width: ENCODED_WIDTH,
+        height: ENCODED_HEIGHT,
+    }));
 
-        let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
-        sock.connect("10.8.0.1:42069").unwrap();
+    // Pray that the window changes size
+    sleep(Duration::from_millis(100)).await;
 
-        sock.send(&vec![1]).unwrap();
+    let mut c = init(&window, decoded_audio).await;
 
-        let mut buf = vec![0; 2048];
-        let recv_bytes = sock.recv(&mut buf).unwrap();
-        sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
-            .unwrap();
+    let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+    sock.connect("10.8.0.1:42069").unwrap();
 
-        let mut video_stream = UdpStream::new();
-        let mut audio_stream = UdpStream::new();
+    sock.send(&vec![1]).unwrap();
 
-        let mut last_audio = Instant::now();
+    let mut buf = vec![0; 2048];
+    let recv_bytes = sock.recv(&mut buf).unwrap();
+    sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
+        .unwrap();
+    let mut tcp_sock = TcpStream::connect("10.8.0.1:42069").unwrap();
 
-        loop {
-            let mut buf = vec![0; 2048];
-            sock.recv(&mut buf).unwrap();
+    let mut video_stream = UdpStream::new();
+    let mut audio_stream = UdpStream::new();
 
-            let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
-            if msg.is_audio {
-                for msg in audio_stream.recv(msg) {
-                    let mut output = vec![0f32; 1920 * 4];
-                    c.audio_decoder
-                        .decode_float(
-                            Some(Packet::try_from(&msg.data).unwrap()),
-                            MutSignals::try_from(&mut output).unwrap(),
-                            false,
-                        )
-                        .unwrap();
-                    // println!(
-                    //     "last audio {} us ago",
-                    //     Instant::now().duration_since(last_audio).as_micros()
-                    // );
-                    last_audio = Instant::now();
-                    c.decoded_audio.lock().unwrap().extend_from_slice(&output);
-                }
-            } else {
-                for msg in video_stream.recv(msg) {
-                    c.accumulate_nal(msg).await;
+    let mut last_audio = Instant::now();
+
+    // Run the windows event loop
+    event_loop
+        .run(move |event, control_flow| match event {
+            Event::WindowEvent {
+                window_id,
+                ref event,
+            } => {
+                if window_id == window.id() {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            control_flow.exit();
+                        }
+                        WindowEvent::Resized(_) => {}
+                        WindowEvent::KeyboardInput {
+                            device_id: _,
+                            event,
+                            is_synthetic: _,
+                        } => {
+                            println!("got keyboard event {:?}", event.physical_key);
+                            let key_text = event.logical_key.to_text();
+                            match key_text {
+                                Some(t) => {
+                                    tcp_sock
+                                        .write(
+                                            &rmp_serde::to_vec(&KeyEvent {
+                                                letter: t.chars().nth(0).unwrap(),
+                                                state: match event.state {
+                                                    winit::event::ElementState::Pressed => true,
+                                                    winit::event::ElementState::Released => false,
+                                                },
+                                            })
+                                            .unwrap(),
+                                        )
+                                        .unwrap();
+                                }
+                                None => {}
+                            }
+                        }
+                        WindowEvent::RedrawRequested => {
+                            let mut buf = vec![0; 2048];
+                            sock.recv(&mut buf).unwrap();
+
+                            let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
+                            if msg.is_audio {
+                                for msg in audio_stream.recv(msg) {
+                                    let mut output = vec![0f32; 1920 * 4];
+                                    c.audio_decoder
+                                        .decode_float(
+                                            Some(Packet::try_from(&msg.data).unwrap()),
+                                            MutSignals::try_from(&mut output).unwrap(),
+                                            false,
+                                        )
+                                        .unwrap();
+                                    // println!(
+                                    //     "last audio {} us ago",
+                                    //     Instant::now().duration_since(last_audio).as_micros()
+                                    // );
+                                    last_audio = Instant::now();
+                                    c.decoded_audio.lock().unwrap().extend_from_slice(&output);
+                                }
+                            } else {
+                                for msg in video_stream.recv(msg) {
+                                    c.accumulate_nal(msg);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
-        }
-    });
+            Event::AboutToWait => {
+                window.request_redraw();
+            }
+            _ => {}
+        })
+        .unwrap();
+}
+
+fn main() {
+    pollster::block_on(run());
 }

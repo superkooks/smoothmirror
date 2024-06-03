@@ -4,14 +4,15 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::mem::transmute;
-use std::net::UdpSocket;
+use std::net::{TcpStream, UdpSocket};
 use std::ops::Deref;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::rc::Rc;
-use std::thread::{sleep, sleep_until};
+use std::thread::{self, sleep, sleep_until};
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaDevice;
+use enigo::{Enigo, Keyboard, Settings};
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{self, Flags};
@@ -44,6 +45,12 @@ struct Msg {
 
     #[serde(with = "serde_bytes")]
     data: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyEvent {
+    letter: char,
+    state: bool,
 }
 
 pub struct Capturer {
@@ -311,6 +318,27 @@ fn main() {
     let recv_bytes = sock.recv(&mut buf).unwrap();
     sock.connect(std::str::from_utf8(&buf[..recv_bytes]).unwrap())
         .unwrap();
+    let mut tcp_sock = TcpStream::connect("10.8.0.1:42069").unwrap();
+
+    // Forward keyboard events to application
+    thread::spawn(move || {
+        let mut enigo = Enigo::new(&Settings::default()).unwrap();
+
+        loop {
+            println!("will read key");
+            let ev = rmp_serde::from_read::<&mut TcpStream, KeyEvent>(&mut tcp_sock).unwrap();
+            println!("got key {} {}", ev.letter, ev.state);
+            enigo
+                .key(
+                    enigo::Key::Unicode(ev.letter),
+                    match ev.state {
+                        true => enigo::Direction::Press,
+                        false => enigo::Direction::Release,
+                    },
+                )
+                .unwrap();
+        }
+    });
 
     sleep(Duration::from_millis(100));
     println!("got display client");
