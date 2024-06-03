@@ -27,7 +27,6 @@ use winit::{
     dpi::{PhysicalSize, Size},
     event::{Event, WindowEvent},
     event_loop::EventLoop,
-    platform::scancode::PhysicalKeyExtScancode,
     window::{Window, WindowBuilder},
 };
 
@@ -172,13 +171,13 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
 
 impl Client {
     fn consume_nal(&mut self, nal: &[u8]) {
-        let mut t = Instant::now();
+        // let mut t = Instant::now();
         let res = self.decoder.send_packet(&ffmpeg_next::Packet::copy(nal));
         // println!(
         //     "took {} us to decode",
         //     Instant::now().duration_since(t).as_micros()
         // );
-        t = Instant::now();
+        // t = Instant::now();
 
         let mut frame = Video::empty();
         if res.is_ok() && self.decoder.receive_frame(&mut frame).is_ok() {
@@ -348,9 +347,6 @@ async fn run() {
     let mut tcp_sock = TcpStream::connect("10.8.0.1:42069").unwrap();
 
     let mut video_stream = UdpStream::new();
-    let mut audio_stream = UdpStream::new();
-
-    let mut last_audio = Instant::now();
 
     // Run the windows event loop
     event_loop
@@ -370,7 +366,7 @@ async fn run() {
                             event,
                             is_synthetic: _,
                         } => {
-                            println!("got keyboard event {:?}", event.physical_key);
+                            // println!("got keyboard event {:?}", event.physical_key);
                             let key_text = event.logical_key.to_text();
                             match key_text {
                                 Some(t) => {
@@ -396,22 +392,15 @@ async fn run() {
 
                             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
                             if msg.is_audio {
-                                for msg in audio_stream.recv(msg) {
-                                    let mut output = vec![0f32; 1920 * 4];
-                                    c.audio_decoder
-                                        .decode_float(
-                                            Some(Packet::try_from(&msg.data).unwrap()),
-                                            MutSignals::try_from(&mut output).unwrap(),
-                                            false,
-                                        )
-                                        .unwrap();
-                                    // println!(
-                                    //     "last audio {} us ago",
-                                    //     Instant::now().duration_since(last_audio).as_micros()
-                                    // );
-                                    last_audio = Instant::now();
-                                    c.decoded_audio.lock().unwrap().extend_from_slice(&output);
-                                }
+                                let mut output = vec![0f32; 1920 * 4];
+                                c.audio_decoder
+                                    .decode_float(
+                                        Some(Packet::try_from(&msg.data).unwrap()),
+                                        MutSignals::try_from(&mut output).unwrap(),
+                                        false,
+                                    )
+                                    .unwrap();
+                                c.decoded_audio.lock().unwrap().extend_from_slice(&output);
                             } else {
                                 for msg in video_stream.recv(msg) {
                                     c.accumulate_nal(msg);

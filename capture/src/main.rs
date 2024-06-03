@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Seek};
-use std::mem::transmute;
 use std::net::{TcpStream, UdpSocket};
 use std::ops::Deref;
 use std::os::fd::{FromRawFd, IntoRawFd};
@@ -67,7 +66,7 @@ pub struct Capturer {
 
     audio_stream: Rc<RefCell<pulse::stream::Stream>>,
     audio_loop: Rc<RefCell<pulse::mainloop::standard::Mainloop>>,
-    audio_ctx: Rc<RefCell<pulse::context::Context>>,
+    _audio_ctx: Rc<RefCell<pulse::context::Context>>,
     audio_encoder: audiopus::coder::Encoder,
 }
 
@@ -202,7 +201,7 @@ pub fn new_encoder() -> Capturer {
         .unwrap(),
         audio_stream: stream,
         audio_loop: ml,
-        audio_ctx: ctx,
+        _audio_ctx: ctx,
         audio_encoder: audiopus::coder::Encoder::new(
             audiopus::SampleRate::Hz48000,
             audiopus::Channels::Stereo,
@@ -347,20 +346,20 @@ fn main() {
     let mut cur_seq_video = 0u64;
     let mut cur_seq_audio = 0u64;
     enc.audio_stream.borrow_mut().uncork(None);
-    let mut last_audio = Instant::now();
+    // let mut last_audio = Instant::now();
 
     loop {
         let loop_start = Instant::now();
 
         // Video
-        println!("capturing...");
-        let mut t = Instant::now();
+        // println!("capturing...");
+        // let mut t = Instant::now();
         let nalus = enc.capture_frame();
-        println!(
-            "captured image after {} us",
-            Instant::now().duration_since(t).as_micros()
-        );
-        t = Instant::now();
+        // println!(
+        //     "captured image after {} us",
+        //     Instant::now().duration_since(t).as_micros()
+        // );
+        // t = Instant::now();
 
         // Packetize the nalus into mtu sized blocks
         let chunks: Vec<&[u8]> = nalus.chunks(1400).collect();
@@ -374,7 +373,7 @@ fn main() {
 
             let buf = rmp_serde::to_vec(&m).unwrap();
             sock.send(&buf).unwrap();
-            println!("sent video packet");
+            // println!("sent video packet");
         }
 
         // Audio
@@ -389,12 +388,12 @@ fn main() {
 
             let buf = rmp_serde::to_vec(&m).unwrap();
             sock.send(&buf).unwrap();
-            println!("sent audio packet");
-            println!(
-                "last audio {} us ago",
-                Instant::now().duration_since(last_audio).as_micros()
-            );
-            last_audio = Instant::now();
+            // println!("sent audio packet");
+            // println!(
+            //     "last audio {} us ago",
+            //     Instant::now().duration_since(last_audio).as_micros()
+            // );
+            // last_audio = Instant::now();
         }
 
         sleep_until(loop_start + FRAME_DURATION);
