@@ -3,6 +3,18 @@ use std::net::TcpListener;
 use std::net::UdpSocket;
 use std::thread;
 
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Serialize, Deserialize)]
+struct Msg {
+    seq: u64,
+    is_audio: bool,
+
+    #[serde(with = "serde_bytes")]
+    data: Vec<u8>,
+}
+
 fn main() {
     let sock = UdpSocket::bind("0.0.0.0:42069").unwrap();
     let tcp_sock = TcpListener::bind("0.0.0.0:42069").unwrap();
@@ -42,9 +54,21 @@ fn main() {
     });
 
     // Transfer between udp connections
+    let mut next_seq = 0;
     loop {
         let mut buf = vec![0; 2048];
         let (size, from) = sock.recv_from(&mut buf).unwrap();
+
+        let msg: Msg = rmp_serde::from_slice(&buf[..size]).unwrap();
+        if !msg.is_audio {
+            if msg.seq != next_seq {
+                println!(
+                    "missing packet from capture {} instead of {}",
+                    msg.seq, next_seq
+                );
+            }
+            next_seq = msg.seq + 1;
+        }
 
         if from == display.unwrap() {
             sock.send_to(&buf[..size], capture.unwrap()).unwrap();
