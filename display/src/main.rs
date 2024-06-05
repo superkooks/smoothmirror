@@ -44,9 +44,10 @@ struct Msg {
 }
 
 #[derive(Serialize, Deserialize)]
-struct KeyEvent {
-    letter: char,
-    state: bool,
+enum KeyEvent {
+    Key { letter: char, state: bool },
+    Mouse { x: f64, y: f64 },
+    Click { button: i32, state: bool },
 }
 
 struct Accumulator(Vec<Vec<u8>>);
@@ -171,22 +172,27 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
 
 impl Client {
     fn consume_nal(&mut self, nal: &[u8]) {
-        // let mut t = Instant::now();
+        let mut t = Instant::now();
         let res = self.decoder.send_packet(&ffmpeg_next::Packet::copy(nal));
         // println!(
-        //     "took {} us to decode",
+        //     "tooked {} us to send packet",
         //     Instant::now().duration_since(t).as_micros()
         // );
-        // t = Instant::now();
+        println!(
+            "took {} us to decode",
+            Instant::now().duration_since(t).as_micros()
+        );
+        t = Instant::now();
 
         let mut frame = Video::empty();
         if res.is_ok() && self.decoder.receive_frame(&mut frame).is_ok() {
             let mut rgb_frame = Video::empty();
             self.scaler.run(&frame, &mut rgb_frame).unwrap();
-            // println!(
-            //     "took {} us to convert",
-            //     Instant::now().duration_since(t).as_micros()
-            // );
+            println!(
+                "took {} us to convert",
+                Instant::now().duration_since(t).as_micros()
+            );
+            t = Instant::now();
 
             let output = self.surface.get_current_texture().unwrap();
 
@@ -211,7 +217,16 @@ impl Client {
             );
 
             self.queue.submit(std::iter::empty());
+            println!(
+                "took {} us to submit to queue",
+                Instant::now().duration_since(t).as_micros()
+            );
+            t = Instant::now();
             output.present();
+            println!(
+                "took {} us to present",
+                Instant::now().duration_since(t).as_micros()
+            );
 
             // println!("presenting")
         }
@@ -344,6 +359,8 @@ async fn run() {
 
     let mut video_stream = UdpStream::new();
 
+    let mut last_poll = Instant::now();
+
     // Run the windows event loop
     event_loop
         .run(move |event, control_flow| match event {
@@ -368,7 +385,7 @@ async fn run() {
                                 Some(t) => {
                                     tcp_sock
                                         .write(
-                                            &rmp_serde::to_vec(&KeyEvent {
+                                            &rmp_serde::to_vec(&KeyEvent::Key {
                                                 letter: t.chars().nth(0).unwrap(),
                                                 state: match event.state {
                                                     winit::event::ElementState::Pressed => true,
@@ -382,9 +399,51 @@ async fn run() {
                                 None => {}
                             }
                         }
+                        WindowEvent::CursorMoved {
+                            device_id: _,
+                            position,
+                        } => {
+                            tcp_sock
+                                .write(
+                                    &rmp_serde::to_vec(&KeyEvent::Mouse {
+                                        x: position.x,
+                                        y: position.y,
+                                    })
+                                    .unwrap(),
+                                )
+                                .unwrap();
+                        }
+                        WindowEvent::MouseInput {
+                            device_id: _,
+                            state,
+                            button,
+                        } => {
+                            let but = match button {
+                                winit::event::MouseButton::Left => 0,
+                                winit::event::MouseButton::Middle => 1,
+                                winit::event::MouseButton::Right => 2,
+                                _ => 3,
+                            };
+                            if but < 3 {
+                                tcp_sock
+                                    .write(
+                                        &rmp_serde::to_vec(&KeyEvent::Click {
+                                            button: but,
+                                            state: state.is_pressed(),
+                                        })
+                                        .unwrap(),
+                                    )
+                                    .unwrap();
+                            }
+                        }
                         WindowEvent::RedrawRequested => {
+                            println!(
+                                "time since last poll {} us",
+                                Instant::now().duration_since(last_poll).as_micros()
+                            );
                             let mut buf = vec![0; 2048];
                             sock.recv(&mut buf).unwrap();
+                            last_poll = Instant::now();
 
                             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
                             if msg.is_audio {

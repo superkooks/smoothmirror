@@ -11,7 +11,7 @@ use std::thread::{self, sleep, sleep_until};
 use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaDevice;
-use enigo::{Enigo, Keyboard, Settings};
+use enigo::{Enigo, Keyboard, Mouse, Settings};
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{self, Flags};
@@ -47,9 +47,10 @@ struct Msg {
 }
 
 #[derive(Serialize, Deserialize)]
-struct KeyEvent {
-    letter: char,
-    state: bool,
+enum KeyEvent {
+    Key { letter: char, state: bool },
+    Mouse { x: f64, y: f64 },
+    Click { button: i32, state: bool },
 }
 
 pub struct Capturer {
@@ -320,18 +321,46 @@ fn main() {
         let mut enigo = Enigo::new(&Settings::default()).unwrap();
 
         loop {
-            println!("will read key");
             let ev = rmp_serde::from_read::<&mut TcpStream, KeyEvent>(&mut tcp_sock).unwrap();
-            println!("got key {} {}", ev.letter, ev.state);
-            enigo
-                .key(
-                    enigo::Key::Unicode(ev.letter),
-                    match ev.state {
-                        true => enigo::Direction::Press,
-                        false => enigo::Direction::Release,
-                    },
-                )
-                .unwrap();
+            match ev {
+                KeyEvent::Key { letter, state } => {
+                    enigo
+                        .key(
+                            enigo::Key::Unicode(letter),
+                            match state {
+                                true => enigo::Direction::Press,
+                                false => enigo::Direction::Release,
+                            },
+                        )
+                        .unwrap();
+                }
+                KeyEvent::Click { button, state } => {
+                    enigo
+                        .button(
+                            match button {
+                                0 => enigo::Button::Left,
+                                1 => enigo::Button::Middle,
+                                2 => enigo::Button::Right,
+                                _ => panic!("invalid button"),
+                            },
+                            match state {
+                                true => enigo::Direction::Press,
+                                false => enigo::Direction::Release,
+                            },
+                        )
+                        .unwrap();
+                }
+                KeyEvent::Mouse { x, y } => {
+                    // println!("{} {}", x, y);
+                    enigo
+                        .move_mouse(
+                            3840 + (x / (ENCODED_WIDTH as f64) * 2560.) as i32,
+                            720 + ((y / (ENCODED_HEIGHT as f64) * 1440.) as i32).min(1440 - 10), // 10px to prevent task bar popup
+                            enigo::Coordinate::Abs,
+                        )
+                        .unwrap();
+                }
+            }
         }
     });
 
