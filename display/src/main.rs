@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::{TcpStream, UdpSocket},
+    net::{SocketAddr, TcpStream, UdpSocket},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -23,6 +23,7 @@ use h264_reader::{
     push::{AccumulatedNalHandler, NalAccumulator, NalInterest},
 };
 use serde::{Deserialize, Serialize};
+use socket2::{Domain, Protocol, Socket, Type};
 use winit::{
     dpi::{PhysicalSize, Size},
     event::{Event, WindowEvent},
@@ -350,7 +351,12 @@ async fn run() {
 
     let mut c = init(&window, decoded_audio).await;
 
-    let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+    socket.set_recv_buffer_size(8 << 20).unwrap();
+    let sock_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    socket.bind(&sock_addr.into()).unwrap();
+
+    let sock: UdpSocket = socket.into();
     sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![1]).unwrap();
     sock.recv(&mut vec![0]).unwrap();
