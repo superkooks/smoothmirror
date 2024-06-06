@@ -49,7 +49,7 @@ jobs:
 
     - name: Get ffmpeg libraries
       run: |
-        vcpkg install ffmpeg
+        vcpkg install ffmpeg -v 6.1.1
       
     - name: Build
       run: |
