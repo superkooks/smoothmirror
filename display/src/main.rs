@@ -340,6 +340,7 @@ async fn run() {
     // Create window
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
+    window.set_resizable(false);
 
     let _ = window.request_inner_size(Size::Physical(PhysicalSize {
         width: ENCODED_WIDTH,
