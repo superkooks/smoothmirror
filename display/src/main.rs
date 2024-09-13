@@ -353,7 +353,10 @@ async fn run() {
     let mut c = init(&window, decoded_audio).await;
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+
+    #[cfg(target_os = "windows")]
     socket.set_recv_buffer_size(8 << 20).unwrap();
+
     let sock_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     socket.bind(&sock_addr.into()).unwrap();
 

@@ -224,7 +224,7 @@ impl Capturer {
             .shm_get_image(
                 self.screen.root,
                 3840,
-                0,
+                240,
                 2560,
                 1440,
                 0x00ffffff,
@@ -355,7 +355,7 @@ fn main() {
                     enigo
                         .move_mouse(
                             3840 + (x / (ENCODED_WIDTH as f64) * 2560.) as i32,
-                            0 + ((y / (ENCODED_HEIGHT as f64) * 1440.) as i32).min(1440 - 10), // 10px to prevent task bar popup
+                            240 + ((y / (ENCODED_HEIGHT as f64) * 1440.) as i32).min(1440 - 10), // 10px to prevent task bar popup
                             enigo::Coordinate::Abs,
                         )
                         .unwrap();
