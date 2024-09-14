@@ -28,6 +28,7 @@ use pulse::mainloop::standard::IterateResult;
 use pulse::stream::PeekResult;
 use serde::{Deserialize, Serialize};
 use x11rb::protocol::shm::ConnectionExt;
+use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{connection::Connection, protocol::xproto::ImageFormat};
@@ -37,9 +38,18 @@ const ENCODED_HEIGHT: u32 = 1080;
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 const FRAME_RATE: u32 = 60;
 
+const CAPTURE_WIDTH: u32 = 2560;
+const CAPTURE_HEIGHT: u32 = 1440;
+const CAPTURE_OFFSET_X: u32 = 3840;
+const CAPTURE_OFFSET_Y: u32 = 240;
+
+// Capture audio with pulseaudio
+// pactl load-module module-null-sink sink_name=sink1
+// Use qpwgraph to connect applications
+
 #[derive(Serialize, Deserialize)]
 struct Msg {
-    seq: u64,
+    seq: i64,
     is_audio: bool,
 
     #[serde(with = "serde_bytes")]
@@ -77,15 +87,20 @@ pub fn new_encoder() -> Capturer {
     let (xconn, screen_num) = x11rb::connect(None).unwrap();
     let screen = xconn.setup().roots[screen_num].clone();
 
+    // Negotiate XFixes version
+    xconn.xfixes_query_version(6, 0).unwrap().reply().unwrap();
+
+    // Create shared memory segment for captures
     let shm_seg = xconn.generate_id().unwrap();
     let shm_reply = xconn
-        .shm_create_segment(shm_seg, 2560 * 1440 * 4, false)
+        .shm_create_segment(shm_seg, CAPTURE_WIDTH * CAPTURE_HEIGHT * 4, false)
         .unwrap()
         .reply()
         .unwrap();
 
     let shm_buf = unsafe { File::from_raw_fd(shm_reply.shm_fd.into_raw_fd()) };
 
+    // Create gpu encoder
     let cuda_device = CudaDevice::new(0).unwrap();
     let encoder = Encoder::initialize_with_cuda(cuda_device).unwrap();
 
@@ -122,6 +137,7 @@ pub fn new_encoder() -> Capturer {
 
     let sess = Box::leak(Box::new(session));
 
+    // Create audio stream
     let spec = pulse::sample::Spec {
         format: pulse::sample::Format::F32le,
         channels: 2,
@@ -159,7 +175,7 @@ pub fn new_encoder() -> Capturer {
     stream
         .borrow_mut()
         .connect_record(
-            Some("input.sink1.monitor"),
+            Some("sink1.monitor"),
             Some(&BufferAttr {
                 maxlength: 7680 * 8,
                 tlength: u32::MAX,
@@ -192,8 +208,8 @@ pub fn new_encoder() -> Capturer {
         out_bits: None,
         scaler: scaling::Context::get(
             Pixel::BGRA,
-            2560,
-            1440,
+            CAPTURE_WIDTH,
+            CAPTURE_HEIGHT,
             Pixel::BGRA,
             ENCODED_WIDTH,
             ENCODED_HEIGHT,
@@ -223,10 +239,10 @@ impl Capturer {
         self.xconn
             .shm_get_image(
                 self.screen.root,
-                3840,
-                240,
-                2560,
-                1440,
+                CAPTURE_OFFSET_X as i16,
+                CAPTURE_OFFSET_Y as i16,
+                CAPTURE_WIDTH as u16,
+                CAPTURE_HEIGHT as u16,
                 0x00ffffff,
                 ImageFormat::Z_PIXMAP.into(),
                 self.shm_seg,
@@ -240,8 +256,48 @@ impl Capturer {
         self.shm_buf.seek(std::io::SeekFrom::Start(0)).unwrap();
         self.shm_buf.read_to_end(&mut image).unwrap();
 
+        // Capture cursor
+        let cursor = self
+            .xconn
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap();
+
+        let ox = cursor.x as i64 - CAPTURE_OFFSET_X as i64;
+        let oy = cursor.y as i64 - CAPTURE_OFFSET_Y as i64;
+
+        // Copy cursor onto image if it is within bounds
+        if ox >= 0 && ox <= CAPTURE_WIDTH as i64 && oy >= 0 && oy <= CAPTURE_HEIGHT as i64 {
+            for x in (ox as i64 - cursor.xhot as i64)
+                ..(ox as i64 + cursor.width as i64 - cursor.xhot as i64)
+            {
+                for y in (oy as i64 - cursor.yhot as i64)
+                    ..(oy as i64 + cursor.height as i64 - cursor.yhot as i64)
+                {
+                    let cx = x - ox as i64 + cursor.xhot as i64;
+                    let cy = y - oy as i64 + cursor.yhot as i64;
+                    let idx = (cx + cy * cursor.width as i64) as usize;
+                    let cb = cursor.cursor_image[idx];
+
+                    let img_offset = (y * CAPTURE_WIDTH as i64 + x) * 4;
+                    if img_offset < 0 || img_offset >= image.len() as i64 {
+                        continue;
+                    }
+
+                    if cb >> 24 as u8 == 0 {
+                        continue;
+                    }
+
+                    image[img_offset as usize] = cb as u8;
+                    image[img_offset as usize + 1] = (cb >> 8) as u8;
+                    image[img_offset as usize + 2] = (cb >> 16) as u8;
+                }
+            }
+        }
+
         // Resize the image
-        let mut input = Video::new(Pixel::BGRA, 2560, 1440);
+        let mut input = Video::new(Pixel::BGRA, CAPTURE_WIDTH, CAPTURE_HEIGHT);
         let mut output = Video::empty();
         input.data_mut(0).copy_from_slice(&image);
         self.scaler.run(&input, &mut output).unwrap();
@@ -353,11 +409,7 @@ fn main() {
                 KeyEvent::Mouse { x, y } => {
                     // println!("{} {}", x, y);
                     enigo
-                        .move_mouse(
-                            3840 + (x / (ENCODED_WIDTH as f64) * 2560.) as i32,
-                            240 + ((y / (ENCODED_HEIGHT as f64) * 1440.) as i32).min(1440 - 10), // 10px to prevent task bar popup
-                            enigo::Coordinate::Abs,
-                        )
+                        .move_mouse(x as i32, y as i32, enigo::Coordinate::Rel)
                         .unwrap();
                 }
             }
@@ -368,10 +420,10 @@ fn main() {
     println!("got display client");
 
     // Begin capturing
-    let mut cur_seq_video = 0u64;
-    let mut cur_seq_audio = 0u64;
+    let mut cur_seq_video = 0i64;
+    let mut cur_seq_audio = 0i64;
     enc.audio_stream.borrow_mut().uncork(None);
-    // let mut last_audio = Instant::now();
+    let mut last_video = Instant::now();
 
     loop {
         let loop_start = Instant::now();
@@ -399,6 +451,11 @@ fn main() {
             let buf = rmp_serde::to_vec(&m).unwrap();
             sock.send(&buf).unwrap();
             // println!("sent video packet");
+            println!(
+                "last video {} us ago",
+                Instant::now().duration_since(last_video).as_micros()
+            );
+            last_video = Instant::now();
         }
 
         // Audio

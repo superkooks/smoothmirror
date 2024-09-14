@@ -25,7 +25,7 @@ use h264_reader::{
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use winit::{
-    dpi::{PhysicalSize, Size},
+    dpi::{PhysicalPosition, PhysicalSize, Size},
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
@@ -37,7 +37,7 @@ const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 
 #[derive(Serialize, Deserialize)]
 struct Msg {
-    seq: u64,
+    seq: i64,
     is_audio: bool,
 
     #[serde(with = "serde_bytes")]
@@ -250,7 +250,7 @@ impl Client {
 }
 
 struct UdpStream {
-    next_seq: u64,
+    next_seq: i64,
     last_in_seq: Instant,
     rearrange_buf: Vec<Msg>,
 }
@@ -341,6 +341,7 @@ async fn run() {
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
     window.set_resizable(false);
+    window.set_cursor_visible(false);
 
     let _ = window.request_inner_size(Size::Physical(PhysicalSize {
         width: ENCODED_WIDTH,
@@ -354,7 +355,7 @@ async fn run() {
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     socket.set_recv_buffer_size(8 << 20).unwrap();
 
     let sock_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -366,6 +367,7 @@ async fn run() {
     sock.recv(&mut vec![0]).unwrap();
 
     let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
+    tcp_sock.set_nonblocking(true).unwrap();
 
     let mut video_stream = UdpStream::new();
 
@@ -413,14 +415,25 @@ async fn run() {
                             device_id: _,
                             position,
                         } => {
+                            let size = window.inner_size();
+
+                            // Send the delta position
                             tcp_sock
                                 .write(
                                     &rmp_serde::to_vec(&KeyEvent::Mouse {
-                                        x: position.x,
-                                        y: position.y,
+                                        x: position.x - size.width as f64 / 2.,
+                                        y: position.y - size.height as f64 / 2.,
                                     })
                                     .unwrap(),
                                 )
+                                .unwrap();
+
+                            // Reset the position of the mouse to the centre
+                            window
+                                .set_cursor_position(PhysicalPosition::new(
+                                    size.width / 2,
+                                    size.height / 2,
+                                ))
                                 .unwrap();
                         }
                         WindowEvent::MouseInput {
