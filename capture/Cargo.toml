@@ -15,3 +15,7 @@ serde_bytes = "0.11.14"
 pulse = { version = "2.28.1", package = "libpulse-binding" }
 audiopus = "0.3.0-rc.0"
 enigo = "0.2.1"
+
+[features]
+default = ["nvenc"]
+nvenc = []

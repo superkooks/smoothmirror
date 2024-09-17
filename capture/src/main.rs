@@ -1,34 +1,26 @@
 #![feature(thread_sleep_until)]
 
-use std::cell::RefCell;
-use std::fs::File;
-use std::io::{Read, Seek};
+mod audio_encode;
+
+#[cfg_attr(target_os = "linux", path = "audio_linux.rs")]
+mod audio_capture;
+
+#[cfg_attr(target_os = "linux", path = "capture_linux.rs")]
+mod video_capture;
+
+#[cfg_attr(feature = "nvenc", path = "encode_nvidia.rs")]
+#[cfg_attr(not(feature = "nvenc"), path = "encode_ffmpeg.rs")]
+mod video_encode;
+
 use std::net::{TcpStream, UdpSocket};
-use std::ops::Deref;
-use std::os::fd::{FromRawFd, IntoRawFd};
-use std::rc::Rc;
 use std::thread::{self, sleep, sleep_until};
 use std::time::{Duration, Instant};
 
-use cudarc::driver::CudaDevice;
+use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
-use nvidia_video_codec_sdk::{
-    sys::nvEncodeAPI::{
-        NV_ENC_CODEC_H264_GUID, NV_ENC_MULTI_PASS, NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P1_GUID,
-    },
-    EncodePictureParams, Encoder,
-};
-use nvidia_video_codec_sdk::{Bitstream, Buffer, Session};
 
-use pulse::def::BufferAttr;
-use pulse::mainloop::standard::IterateResult;
-use pulse::stream::PeekResult;
 use serde::{Deserialize, Serialize};
-use x11rb::protocol::shm::ConnectionExt;
-use x11rb::protocol::xfixes::ConnectionExt as _;
-use x11rb::protocol::xproto::Screen;
-use x11rb::rust_connection::RustConnection;
-use x11rb::{connection::Connection, protocol::xproto::ImageFormat};
+use video_encode::VideoEncoder;
 
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 const FRAME_RATE: u32 = 60;
@@ -37,10 +29,6 @@ const CAPTURE_WIDTH: u32 = 2560;
 const CAPTURE_HEIGHT: u32 = 1440;
 const CAPTURE_OFFSET_X: u32 = 3840;
 const CAPTURE_OFFSET_Y: u32 = 240;
-
-// Capture audio with pulseaudio
-// pactl load-module module-null-sink sink_name=sink1
-// Use qpwgraph to connect applications
 
 #[derive(Serialize, Deserialize)]
 struct Msg {
@@ -59,280 +47,17 @@ enum KeyEvent {
 }
 
 pub struct Capturer {
-    xconn: RustConnection,
-    session: &'static Session,
-    screen: Screen,
-
-    shm_buf: File,
-    shm_seg: u32,
-
-    in_buf: Option<Buffer<'static>>,
-    out_bits: Option<Bitstream<'static>>,
-
-    audio_stream: Rc<RefCell<pulse::stream::Stream>>,
-    audio_loop: Rc<RefCell<pulse::mainloop::standard::Mainloop>>,
-    _audio_ctx: Rc<RefCell<pulse::context::Context>>,
-    audio_encoder: audiopus::coder::Encoder,
+    audio: AudioEncoder,
+    video: VideoEncoder,
 }
 
 pub fn new_encoder() -> Capturer {
     println!("capture starting");
 
-    let (xconn, screen_num) = x11rb::connect(None).unwrap();
-    let screen = xconn.setup().roots[screen_num].clone();
+    let audio = AudioEncoder::new();
+    let video = VideoEncoder::new();
 
-    // Negotiate XFixes version
-    xconn.xfixes_query_version(6, 0).unwrap().reply().unwrap();
-
-    // Create shared memory segment for captures
-    let shm_seg = xconn.generate_id().unwrap();
-    let shm_reply = xconn
-        .shm_create_segment(shm_seg, CAPTURE_WIDTH * CAPTURE_HEIGHT * 4, false)
-        .unwrap()
-        .reply()
-        .unwrap();
-
-    let shm_buf = unsafe { File::from_raw_fd(shm_reply.shm_fd.into_raw_fd()) };
-
-    // Create gpu encoder
-    let cuda_device = CudaDevice::new(0).unwrap();
-    let encoder = Encoder::initialize_with_cuda(cuda_device).unwrap();
-
-    let mut enc_conf = encoder.get_preset_config(
-        NV_ENC_CODEC_H264_GUID,
-        NV_ENC_PRESET_P1_GUID,
-        nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
-    ).unwrap().presetCfg;
-    enc_conf.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
-    enc_conf.rcParams.averageBitRate = 8 << 20;
-    enc_conf.rcParams.multiPass = NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
-    enc_conf.rcParams.lowDelayKeyFrameScale = 0;
-    enc_conf.rcParams.enableAQ();
-    unsafe {
-        enc_conf.encodeCodecConfig.h264Config.repeatSPSPPS();
-        enc_conf.encodeCodecConfig.h264Config.idrPeriod = 128;
-        enc_conf.encodeCodecConfig.h264Config.enableLTR();
-        // enc_conf.encodeCodecConfig.h264Config.sliceMode = 1;
-        // enc_conf.encodeCodecConfig.h264Config.sliceModeData = 1300 - 28;
-    };
-
-    let mut init_params = nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_INITIALIZE_PARAMS::new(
-        NV_ENC_CODEC_H264_GUID,
-        CAPTURE_WIDTH,
-        CAPTURE_HEIGHT,
-    );
-    init_params.encode_config(&mut enc_conf);
-    init_params.enable_picture_type_decision();
-    init_params.display_aspect_ratio(16, 9);
-    init_params.framerate(FRAME_RATE, 1);
-
-    let session = encoder.start_session(
-        nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ARGB,
-        init_params,
-    ).unwrap();
-
-    let sess = Box::leak(Box::new(session));
-
-    // Create audio stream
-    let spec = pulse::sample::Spec {
-        format: pulse::sample::Format::F32le,
-        channels: 2,
-        rate: 48000,
-    };
-    assert!(spec.is_valid());
-
-    let ml = Rc::new(RefCell::new(
-        pulse::mainloop::standard::Mainloop::new().unwrap(),
-    ));
-
-    let ctx = Rc::new(RefCell::new(
-        pulse::context::Context::new(ml.borrow().deref(), "prospectivegopher").unwrap(),
-    ));
-    ctx.borrow_mut()
-        .connect(None, pulse::context::FlagSet::empty(), None)
-        .unwrap();
-    loop {
-        match ml.borrow_mut().iterate(false) {
-            IterateResult::Quit(_) | IterateResult::Err(_) => panic!("ahhhhh"),
-            IterateResult::Success(_) => {}
-        }
-        match ctx.borrow().get_state() {
-            pulse::context::State::Ready => break,
-            pulse::context::State::Failed | pulse::context::State::Terminated => {
-                panic!("ahhhh (2)")
-            }
-            _ => {}
-        }
-    }
-
-    let stream = Rc::new(RefCell::new(
-        pulse::stream::Stream::new(&mut ctx.borrow_mut(), "desktop audio", &spec, None).unwrap(),
-    ));
-    stream
-        .borrow_mut()
-        .connect_record(
-            Some("sink1.monitor"),
-            Some(&BufferAttr {
-                maxlength: 7680 * 8,
-                tlength: u32::MAX,
-                prebuf: u32::MAX,
-                minreq: u32::MAX,
-                fragsize: 7680 * 4,
-            }),
-            pulse::stream::FlagSet::START_CORKED | pulse::stream::FlagSet::ADJUST_LATENCY,
-        )
-        .unwrap();
-    loop {
-        match ml.borrow_mut().iterate(false) {
-            IterateResult::Quit(_) | IterateResult::Err(_) => panic!("ahhhhh"),
-            IterateResult::Success(_) => {}
-        }
-        match stream.borrow().get_state() {
-            pulse::stream::State::Ready => break,
-            pulse::stream::State::Failed | pulse::stream::State::Terminated => panic!("ahhhh"),
-            _ => {}
-        }
-    }
-
-    let mut e = Capturer {
-        xconn,
-        session: sess,
-        screen,
-        shm_buf,
-        shm_seg,
-        in_buf: None,
-        out_bits: None,
-        audio_stream: stream,
-        audio_loop: ml,
-        _audio_ctx: ctx,
-        audio_encoder: audiopus::coder::Encoder::new(
-            audiopus::SampleRate::Hz48000,
-            audiopus::Channels::Stereo,
-            audiopus::Application::Audio,
-        )
-        .unwrap(),
-    };
-
-    e.in_buf = Some(sess.create_input_buffer().unwrap());
-    e.out_bits = Some(sess.create_output_bitstream().unwrap());
-
-    e
-}
-
-impl Capturer {
-    pub fn capture_frame(&mut self) -> Vec<u8> {
-        // Capture screen from x11, using shared memory
-        self.xconn
-            .shm_get_image(
-                self.screen.root,
-                CAPTURE_OFFSET_X as i16,
-                CAPTURE_OFFSET_Y as i16,
-                CAPTURE_WIDTH as u16,
-                CAPTURE_HEIGHT as u16,
-                0x00ffffff,
-                ImageFormat::Z_PIXMAP.into(),
-                self.shm_seg,
-                0,
-            )
-            .unwrap()
-            .reply()
-            .unwrap();
-
-        let mut image = vec![];
-        self.shm_buf.seek(std::io::SeekFrom::Start(0)).unwrap();
-        self.shm_buf.read_to_end(&mut image).unwrap();
-
-        // Capture cursor
-        let cursor = self
-            .xconn
-            .xfixes_get_cursor_image()
-            .unwrap()
-            .reply()
-            .unwrap();
-
-        let ox = cursor.x as i64 - CAPTURE_OFFSET_X as i64;
-        let oy = cursor.y as i64 - CAPTURE_OFFSET_Y as i64;
-
-        // Copy cursor onto image if it is within bounds
-        if ox >= 0 && ox <= CAPTURE_WIDTH as i64 && oy >= 0 && oy <= CAPTURE_HEIGHT as i64 {
-            for x in (ox as i64 - cursor.xhot as i64)
-                ..(ox as i64 + cursor.width as i64 - cursor.xhot as i64)
-            {
-                for y in (oy as i64 - cursor.yhot as i64)
-                    ..(oy as i64 + cursor.height as i64 - cursor.yhot as i64)
-                {
-                    let cx = x - ox as i64 + cursor.xhot as i64;
-                    let cy = y - oy as i64 + cursor.yhot as i64;
-                    let idx = (cx + cy * cursor.width as i64) as usize;
-                    let cb = cursor.cursor_image[idx];
-
-                    let img_offset = (y * CAPTURE_WIDTH as i64 + x) * 4;
-                    if img_offset < 0 || img_offset >= image.len() as i64 {
-                        continue;
-                    }
-
-                    if cb >> 24 as u8 == 0 {
-                        continue;
-                    }
-
-                    image[img_offset as usize] = cb as u8;
-                    image[img_offset as usize + 1] = (cb >> 8) as u8;
-                    image[img_offset as usize + 2] = (cb >> 16) as u8;
-                }
-            }
-        }
-
-        // Encode the image, writing potentially multiple nalus
-        unsafe { self.in_buf.as_mut().unwrap().lock().unwrap().write(&image) };
-        self.session
-            .encode_picture(
-                self.in_buf.as_mut().unwrap(),
-                self.out_bits.as_mut().unwrap(),
-                EncodePictureParams::default(),
-            )
-            .unwrap();
-
-        let nalus = self.out_bits.as_mut().unwrap().lock().unwrap();
-
-        return nalus.data().to_vec();
-    }
-
-    pub fn capture_audio(&mut self) -> Vec<u8> {
-        match self.audio_loop.borrow_mut().iterate(false) {
-            IterateResult::Quit(_) | IterateResult::Err(_) => {
-                eprintln!("Iterate state was not success, quitting...");
-                return vec![];
-            }
-            IterateResult::Success(_) => {}
-        }
-
-        let peek_res = self.audio_stream.borrow_mut().peek().unwrap();
-        match peek_res {
-            PeekResult::Data(data) => {
-                // println!("got buffer data len {}", data.len());
-                self.audio_stream.borrow_mut().discard().unwrap();
-
-                // Encode in batches of 20ms
-                let (prefix, floats, suffix) = unsafe { data.align_to::<f32>() };
-                assert!(prefix.len() == 0 && suffix.len() == 0);
-
-                let mut encoded = vec![0; 1400];
-
-                let count = self
-                    .audio_encoder
-                    .encode_float(&floats, &mut encoded)
-                    .unwrap();
-
-                encoded.truncate(count);
-
-                return encoded;
-            }
-            PeekResult::Empty => {}
-            PeekResult::Hole(_) => self.audio_stream.borrow_mut().discard().unwrap(),
-        };
-
-        vec![]
-    }
+    Capturer { audio, video }
 }
 
 fn main() {
@@ -395,7 +120,7 @@ fn main() {
     // Begin capturing
     let mut cur_seq_video = 0i64;
     let mut cur_seq_audio = 0i64;
-    enc.audio_stream.borrow_mut().uncork(None);
+    enc.audio.source.uncork();
     let mut last_video = Instant::now();
 
     loop {
@@ -404,7 +129,7 @@ fn main() {
         // Video
         // println!("capturing...");
         // let mut t = Instant::now();
-        let nalus = enc.capture_frame();
+        let nalus = enc.video.capture_and_encode();
         // println!(
         //     "captured image after {} us",
         //     Instant::now().duration_since(t).as_micros()
@@ -432,12 +157,12 @@ fn main() {
         }
 
         // Audio
-        let packet = enc.capture_audio();
-        if !packet.is_empty() {
+        let packet = enc.audio.capture_and_encode();
+        if packet.is_some() {
             let m = Msg {
                 seq: cur_seq_audio,
                 is_audio: true,
-                data: packet,
+                data: packet.unwrap(),
             };
             cur_seq_audio += 1;
 
