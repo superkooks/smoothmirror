@@ -31,8 +31,8 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-const ENCODED_WIDTH: u32 = 1920;
-const ENCODED_HEIGHT: u32 = 1080;
+const ENCODED_WIDTH: u32 = 2560;
+const ENCODED_HEIGHT: u32 = 1440;
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 
 #[derive(Serialize, Deserialize)]
@@ -148,8 +148,8 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
         ENCODED_WIDTH,
         ENCODED_HEIGHT,
         Pixel::BGRA,
-        ENCODED_WIDTH,
-        ENCODED_HEIGHT,
+        size.width,
+        size.height,
         Flags::empty(),
     )
     .unwrap();
@@ -207,12 +207,12 @@ impl Client {
                 &rgb_frame.data(0),
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * ENCODED_WIDTH),
-                    rows_per_image: Some(ENCODED_HEIGHT),
+                    bytes_per_row: Some(4 * rgb_frame.width()),
+                    rows_per_image: Some(rgb_frame.height()),
                 },
                 wgpu::Extent3d {
-                    width: ENCODED_WIDTH,
-                    height: ENCODED_HEIGHT,
+                    width: rgb_frame.width(),
+                    height: rgb_frame.height(),
                     depth_or_array_layers: 1,
                 },
             );
@@ -344,8 +344,8 @@ async fn run() {
     window.set_cursor_visible(false);
 
     let _ = window.request_inner_size(Size::Physical(PhysicalSize {
-        width: ENCODED_WIDTH,
-        height: ENCODED_HEIGHT,
+        width: 1920,
+        height: 1080,
     }));
 
     // Pray that the window changes size

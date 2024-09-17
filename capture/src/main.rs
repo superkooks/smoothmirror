@@ -12,9 +12,6 @@ use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaDevice;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
-use ffmpeg_next::format::Pixel;
-use ffmpeg_next::frame::Video;
-use ffmpeg_next::software::scaling::{self, Flags};
 use nvidia_video_codec_sdk::{
     sys::nvEncodeAPI::{
         NV_ENC_CODEC_H264_GUID, NV_ENC_MULTI_PASS, NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P1_GUID,
@@ -33,8 +30,6 @@ use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{connection::Connection, protocol::xproto::ImageFormat};
 
-const ENCODED_WIDTH: u32 = 1920;
-const ENCODED_HEIGHT: u32 = 1080;
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 const FRAME_RATE: u32 = 60;
 
@@ -67,7 +62,6 @@ pub struct Capturer {
     xconn: RustConnection,
     session: &'static Session,
     screen: Screen,
-    scaler: scaling::Context,
 
     shm_buf: File,
     shm_seg: u32,
@@ -113,17 +107,19 @@ pub fn new_encoder() -> Capturer {
     enc_conf.rcParams.averageBitRate = 8 << 20;
     enc_conf.rcParams.multiPass = NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
     enc_conf.rcParams.lowDelayKeyFrameScale = 0;
+    enc_conf.rcParams.enableAQ();
     unsafe {
         enc_conf.encodeCodecConfig.h264Config.repeatSPSPPS();
         enc_conf.encodeCodecConfig.h264Config.idrPeriod = 128;
+        enc_conf.encodeCodecConfig.h264Config.enableLTR();
         // enc_conf.encodeCodecConfig.h264Config.sliceMode = 1;
         // enc_conf.encodeCodecConfig.h264Config.sliceModeData = 1300 - 28;
     };
 
     let mut init_params = nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_INITIALIZE_PARAMS::new(
         NV_ENC_CODEC_H264_GUID,
-        ENCODED_WIDTH,
-        ENCODED_HEIGHT,
+        CAPTURE_WIDTH,
+        CAPTURE_HEIGHT,
     );
     init_params.encode_config(&mut enc_conf);
     init_params.enable_picture_type_decision();
@@ -206,16 +202,6 @@ pub fn new_encoder() -> Capturer {
         shm_seg,
         in_buf: None,
         out_bits: None,
-        scaler: scaling::Context::get(
-            Pixel::BGRA,
-            CAPTURE_WIDTH,
-            CAPTURE_HEIGHT,
-            Pixel::BGRA,
-            ENCODED_WIDTH,
-            ENCODED_HEIGHT,
-            Flags::FAST_BILINEAR,
-        )
-        .unwrap(),
         audio_stream: stream,
         audio_loop: ml,
         _audio_ctx: ctx,
@@ -296,21 +282,8 @@ impl Capturer {
             }
         }
 
-        // Resize the image
-        let mut input = Video::new(Pixel::BGRA, CAPTURE_WIDTH, CAPTURE_HEIGHT);
-        let mut output = Video::empty();
-        input.data_mut(0).copy_from_slice(&image);
-        self.scaler.run(&input, &mut output).unwrap();
-
         // Encode the image, writing potentially multiple nalus
-        unsafe {
-            self.in_buf
-                .as_mut()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .write(&output.data(0))
-        };
+        unsafe { self.in_buf.as_mut().unwrap().lock().unwrap().write(&image) };
         self.session
             .encode_picture(
                 self.in_buf.as_mut().unwrap(),
