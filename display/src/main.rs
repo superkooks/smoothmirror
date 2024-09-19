@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::Write,
     net::{SocketAddr, TcpStream, UdpSocket},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -11,17 +11,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
-use ffmpeg_next::{
-    codec, decoder,
-    format::Pixel,
-    frame::Video,
-    software::scaling::{self, Flags},
-};
-use h264_reader::{
-    annexb::AnnexBReader,
-    nal::{Nal, RefNal},
-    push::{AccumulatedNalHandler, NalAccumulator, NalInterest},
-};
+use ffmpeg_sys_next::{self as ffmpeg, avcodec_open2, SWS_BILINEAR};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use winit::{
@@ -51,27 +41,12 @@ enum KeyEvent {
     Click { button: i32, state: bool },
 }
 
-struct Accumulator(Vec<Vec<u8>>);
-impl AccumulatedNalHandler for Accumulator {
-    fn nal(&mut self, nal: RefNal<'_>) -> NalInterest {
-        if !nal.is_complete() {
-            return NalInterest::Buffer;
-        }
-
-        // println!("have complete nal");
-        let mut nal_data = vec![0, 0, 0, 1];
-        nal.reader().read_to_end(&mut nal_data).unwrap();
-        self.0.push(nal_data);
-        return NalInterest::Buffer;
-    }
-}
-
 struct Client {
     queue: wgpu::Queue,
-    decoder: ffmpeg_next::decoder::Video,
+    decoder: *mut ffmpeg::AVCodecContext,
+    parser: *mut ffmpeg::AVCodecParserContext,
     surface: wgpu::Surface,
-    scaler: scaling::Context,
-    annexb: h264_reader::annexb::AnnexBReader<NalAccumulator<Accumulator>>,
+    scaler: *mut ffmpeg::SwsContext,
 
     audio_decoder: audiopus::coder::Decoder,
     decoded_audio: Arc<Mutex<Vec<f32>>>,
@@ -134,34 +109,38 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
         size.width
     );
 
-    // Create decoder
-    ffmpeg_next::init().unwrap();
+    // Create video decoder
+    let codec = unsafe { ffmpeg::avcodec_find_decoder(ffmpeg::AVCodecID::AV_CODEC_ID_H264) };
 
-    let codec = decoder::find(codec::Id::H264).unwrap();
-    let decoder = codec::Context::new_with_codec(codec)
-        .decoder()
-        .video()
-        .unwrap();
+    let parser = unsafe { ffmpeg::av_parser_init((*codec).id as i32) };
 
-    let scaler = scaling::Context::get(
-        Pixel::YUV420P,
-        ENCODED_WIDTH,
-        ENCODED_HEIGHT,
-        Pixel::BGRA,
-        size.width,
-        size.height,
-        Flags::empty(),
-    )
-    .unwrap();
+    let decoder = unsafe { ffmpeg::avcodec_alloc_context3(codec) };
 
-    // Create audio stream
+    unsafe {
+        avcodec_open2(decoder, codec, std::ptr::null_mut());
+    }
+
+    let scaler = unsafe {
+        ffmpeg::sws_getContext(
+            ENCODED_WIDTH as i32,
+            ENCODED_HEIGHT as i32,
+            ffmpeg::AVPixelFormat::AV_PIX_FMT_YUV420P,
+            size.width as i32,
+            size.height as i32,
+            ffmpeg::AVPixelFormat::AV_PIX_FMT_BGRA,
+            SWS_BILINEAR,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
 
     Client {
         queue,
         decoder,
+        parser,
         surface,
         scaler,
-        annexb: AnnexBReader::accumulate(Accumulator(vec![])),
         audio_decoder: audiopus::coder::Decoder::new(
             audiopus::SampleRate::Hz48000,
             audiopus::Channels::Stereo,
@@ -172,9 +151,11 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
 }
 
 impl Client {
-    fn consume_nal(&mut self, nal: &[u8]) {
+    fn consume_nalu(&mut self, mut nals: *mut ffmpeg::AVPacket) {
         let mut t = Instant::now();
-        let res = self.decoder.send_packet(&ffmpeg_next::Packet::copy(nal));
+        let res = unsafe { ffmpeg::avcodec_send_packet(self.decoder, nals) };
+        unsafe { ffmpeg::av_packet_free(std::ptr::addr_of_mut!(nals)) };
+        println!("send_packet={}", res);
         // println!(
         //     "tooked {} us to send packet",
         //     Instant::now().duration_since(t).as_micros()
@@ -185,66 +166,96 @@ impl Client {
         );
         t = Instant::now();
 
-        let mut frame = Video::empty();
-        if res.is_ok() && self.decoder.receive_frame(&mut frame).is_ok() {
-            let mut rgb_frame = Video::empty();
-            self.scaler.run(&frame, &mut rgb_frame).unwrap();
-            println!(
-                "took {} us to convert",
-                Instant::now().duration_since(t).as_micros()
-            );
-            t = Instant::now();
+        let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
+        let res2 = unsafe { ffmpeg::avcodec_receive_frame(self.decoder, yuv_frame) };
+        println!("receive_frame={}", res2);
 
-            let output = self.surface.get_current_texture().unwrap();
-
-            self.queue.write_texture(
-                wgpu::ImageCopyTextureBase {
-                    texture: &output.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &rgb_frame.data(0),
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * rgb_frame.width()),
-                    rows_per_image: Some(rgb_frame.height()),
-                },
-                wgpu::Extent3d {
-                    width: rgb_frame.width(),
-                    height: rgb_frame.height(),
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            self.queue.submit(std::iter::empty());
-            println!(
-                "took {} us to submit to queue",
-                Instant::now().duration_since(t).as_micros()
-            );
-            t = Instant::now();
-            output.present();
-            println!(
-                "took {} us to present",
-                Instant::now().duration_since(t).as_micros()
-            );
-
-            // println!("presenting")
+        if res2 < 0 {
+            return;
         }
+
+        let mut rgb_frame = unsafe { ffmpeg::av_frame_alloc() };
+        let res3 = unsafe { ffmpeg::sws_scale_frame(self.scaler, rgb_frame, yuv_frame) };
+        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
+        println!("sws_scale_frame={}", res3);
+        println!(
+            "took {} us to convert",
+            Instant::now().duration_since(t).as_micros()
+        );
+        t = Instant::now();
+
+        let output = self.surface.get_current_texture().unwrap();
+
+        let rescaled_width = unsafe { *rgb_frame }.width as u32;
+        let rescaled_height = unsafe { *rgb_frame }.height as u32;
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTextureBase {
+                texture: &output.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            unsafe {
+                std::slice::from_raw_parts((*rgb_frame).data[0], (*(*rgb_frame).buf[0]).size)
+            },
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * rescaled_width),
+                rows_per_image: Some(rescaled_height),
+            },
+            wgpu::Extent3d {
+                width: rescaled_width,
+                height: rescaled_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(std::iter::empty());
+        println!(
+            "took {} us to submit to queue",
+            Instant::now().duration_since(t).as_micros()
+        );
+        t = Instant::now();
+        output.present();
+        println!(
+            "took {} us to present",
+            Instant::now().duration_since(t).as_micros()
+        );
+
+        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(rgb_frame)) };
+
+        // println!("presenting")
+        // }
     }
 
-    fn accumulate_nal(&mut self, msg: Msg) {
-        // println!("accumulating nals");
-        self.annexb.push(&msg.data);
+    fn accumulate_nalus(&mut self, mut msg: &[u8]) {
+        let mut pkt = unsafe { ffmpeg::av_packet_alloc() };
+        while msg.len() > 0 {
+            let n = unsafe {
+                ffmpeg::av_parser_parse2(
+                    self.parser,
+                    self.decoder,
+                    std::ptr::addr_of_mut!((*pkt).data),
+                    std::ptr::addr_of_mut!((*pkt).size),
+                    msg.as_ptr(),
+                    msg.len() as i32,
+                    ffmpeg::AV_NOPTS_VALUE,
+                    ffmpeg::AV_NOPTS_VALUE,
+                    0,
+                )
+            };
 
-        loop {
-            if self.annexb.nal_handler_ref().0.len() == 0 {
-                break;
+            if n < 0 {
+                panic!("av_parser_parse2={}", n);
             }
 
-            // println!("about to consume nal");
-            let nalu = self.annexb.nal_handler_mut().0.remove(0);
-            self.consume_nal(&nalu);
+            msg = &msg[n as usize..];
+
+            if unsafe { *pkt }.size > 0 {
+                self.consume_nalu(pkt);
+                pkt = unsafe { ffmpeg::av_packet_alloc() };
+            }
         }
     }
 }
@@ -370,6 +381,7 @@ async fn run() {
     tcp_sock.set_nonblocking(true).unwrap();
 
     let mut video_stream = UdpStream::new();
+    // let mut video_stream = TcpStream::connect("localhost:9999").unwrap();
 
     let mut last_poll = Instant::now();
 
@@ -391,7 +403,7 @@ async fn run() {
                             event,
                             is_synthetic: _,
                         } => {
-                            // println!("got keyboard event {:?}", event.physical_key);
+                            println!("got keyboard event {:?}", event.physical_key);
                             let key_text = event.logical_key.to_text();
                             match key_text {
                                 Some(t) => {
@@ -481,9 +493,12 @@ async fn run() {
                                 c.decoded_audio.lock().unwrap().extend_from_slice(&output);
                             } else {
                                 for msg in video_stream.recv(msg) {
-                                    c.accumulate_nal(msg);
+                                    c.accumulate_nalus(&msg.data);
                                 }
                             }
+                            // let mut b = vec![0; 8192];
+                            // let n = video_stream.read(&mut b).unwrap();
+                            // c.accumulate_nal(&b);
                         }
                         _ => {}
                     }

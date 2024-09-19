@@ -492,6 +492,7 @@ dependencies = [
  "audiopus",
  "cudarc",
  "enigo",
+ "ffmpeg-sys-next",
  "libpulse-binding",
  "nvidia-video-codec-sdk",
  "rmp-serde",
@@ -724,7 +725,7 @@ dependencies = [
  "async-std",
  "audiopus",
  "cpal",
- "ffmpeg-next",
+ "ffmpeg-sys-next",
  "h264-reader",
  "pollster",
  "rmp-serde",
@@ -832,21 +833,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 
 [[package]]
-name = "ffmpeg-next"
-version = "7.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddfce5242643c8a57b5a44b7e933ccbde85f9508d1379e578e97eee4a9d4334b"
-dependencies = [
- "bitflags 2.5.0",
- "ffmpeg-sys-next",
- "libc",
-]
-
-[[package]]
 name = "ffmpeg-sys-next"
-version = "7.0.0"
+version = "7.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "972a460dd8e901b737ce0482bf71a837e1751e3dd7c8f8b0a4ead808e7f174a5"
+checksum = "dc33ac996bad6d164a08069a1e9b3370045860dba3d315acda09420f1febef9e"
 dependencies = [
  "bindgen",
  "cc",
