@@ -21,10 +21,15 @@ jobs:
         name: mac-bin 
         path: target/debug/display
 
+    - name: Debug with tmate on failure
+      if: ${{ failure() }}
+      uses: mxschmitt/action-tmate@v3
+
   build-windows:
     runs-on: windows-latest
 
     steps:
+    - uses: ilammy/setup-nasm@v1
     - uses: actions/checkout@v4
   
     - name: Build
