@@ -114,6 +114,9 @@ fn main() {
         }
     });
 
+    // let mut socket = TcpListener::bind("localhost:9999").unwrap();
+    // let mut conn = socket.accept().unwrap().0;
+
     sleep(Duration::from_millis(100));
     println!("got display client");
 
@@ -148,6 +151,7 @@ fn main() {
 
             let buf = rmp_serde::to_vec(&m).unwrap();
             sock.send(&buf).unwrap();
+            // conn.write_all(&buf).unwrap();
             // println!("sent video packet");
             println!(
                 "last video {} us ago",

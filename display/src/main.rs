@@ -11,7 +11,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
-use ffmpeg_sys_next::{self as ffmpeg, avcodec_open2, SWS_BILINEAR};
+use ffmpeg_sys_next::{self as ffmpeg};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use winit::{
@@ -117,7 +117,7 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
     let decoder = unsafe { ffmpeg::avcodec_alloc_context3(codec) };
 
     unsafe {
-        avcodec_open2(decoder, codec, std::ptr::null_mut());
+        ffmpeg::avcodec_open2(decoder, codec, std::ptr::null_mut());
     }
 
     let scaler = unsafe {
@@ -128,7 +128,7 @@ async fn init(window: &Window, decoded_audio: Arc<Mutex<Vec<f32>>>) -> Client {
             size.width as i32,
             size.height as i32,
             ffmpeg::AVPixelFormat::AV_PIX_FMT_BGRA,
-            SWS_BILINEAR,
+            ffmpeg::SWS_BILINEAR,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
