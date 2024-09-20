@@ -27,11 +27,13 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    env: 
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
     steps:
     - uses: actions/checkout@v4
   
-    - name: Install pkg-config & vcpkg
+    - name: Install vcpkg
       run: |
         vcpkg integrate install
 
@@ -44,7 +46,7 @@ jobs:
 
     - name: Get ffmpeg libraries
       run: |
-        vcpkg install ffmpeg
+        vcpkg install ffmpeg:x64-windows-static-md
 
     - name: Build
       run: |
