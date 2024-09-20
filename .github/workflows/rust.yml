@@ -30,8 +30,18 @@ jobs:
 
     steps:
     - uses: ilammy/setup-nasm@v1
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        update: true
+
     - uses: actions/checkout@v4
   
+    - name: Install pthreads
+      shell: msys2 {0}
+      run: |
+        pacman -Sy --noconfirm gcc
+
     - name: Build
       run: |
         cargo build --verbose --bin display
