@@ -12,14 +12,20 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       
-    - name: Build
+    - name: Build display
       run: |
         cargo build --verbose --bin display
 
+    - name: Build capture
+      run: |
+        cargo build --verbose --bin capture
+
     - uses: actions/upload-artifact@v4
       with:
-        name: mac-bin 
-        path: target/debug/display
+        name: mac-bin
+        path: |
+          target/debug/display
+          target/debug/capture
 
     - name: Debug with tmate on failure
       if: ${{ failure() }}
@@ -48,14 +54,20 @@ jobs:
       run: |
         vcpkg install ffmpeg:x64-windows-static-md
 
-    - name: Build
+    - name: Build display
       run: |
         cargo build --verbose --bin display
+
+    - name: Build capture
+      run: |
+        cargo build --verbose --bin capture
 
     - uses: actions/upload-artifact@v4
       with:
         name: windows-bin
-        path: target/debug/display.exe
+        path: |
+          target/debug/display.exe
+          target/debug/capture.exe
 
     - name: Debug with tmate on failure
       if: ${{ failure() }}
