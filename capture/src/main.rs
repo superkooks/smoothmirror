@@ -3,9 +3,11 @@
 mod audio_encode;
 
 #[cfg_attr(target_os = "linux", path = "audio_linux.rs")]
+#[cfg_attr(target_os = "windows", path = "audio_windows.rs")]
 mod audio_capture;
 
 #[cfg_attr(target_os = "linux", path = "capture_linux.rs")]
+#[cfg_attr(target_os = "windows", path = "capture_windows.rs")]
 mod video_capture;
 
 #[cfg_attr(feature = "nvenc", path = "encode_nvidia.rs")]
@@ -65,14 +67,16 @@ fn main() {
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
     sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![0]).unwrap();
-    sock.recv(&mut vec![]).unwrap();
+    sock.recv(&mut vec![0]).unwrap();
 
     println!("waiting for a display client");
     let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
+    tcp_sock.set_nodelay(true).unwrap();
 
     // Forward keyboard events to application
     thread::spawn(move || {
         let mut enigo = Enigo::new(&Settings::default()).unwrap();
+        let mut t = Instant::now();
 
         loop {
             let ev = rmp_serde::from_read::<&mut TcpStream, KeyEvent>(&mut tcp_sock).unwrap();
@@ -106,6 +110,11 @@ fn main() {
                 }
                 KeyEvent::Mouse { x, y } => {
                     // println!("{} {}", x, y);
+                    println!(
+                        "last mouse {} us ago",
+                        Instant::now().duration_since(t).as_micros()
+                    );
+                    t = Instant::now();
                     enigo
                         .move_mouse(x as i32, y as i32, enigo::Coordinate::Rel)
                         .unwrap();

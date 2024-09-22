@@ -1,13 +1,13 @@
-use std::ffi::CString;
+use std::{ffi::CString, time::Instant};
 
-use ffmpeg_sys_next::{self as ffmpeg, av_frame_alloc};
+use ffmpeg_sys_next as ffmpeg;
 
 use crate::{video_capture::VideoCapturer, CAPTURE_HEIGHT, CAPTURE_WIDTH, FRAME_RATE};
 
 pub struct VideoEncoder {
     capturer: VideoCapturer,
     encoder: *mut ffmpeg::AVCodecContext,
-    scaler: *mut ffmpeg::SwsContext,
+    pts: i64,
 }
 
 impl VideoEncoder {
@@ -41,61 +41,83 @@ impl VideoEncoder {
             ffmpeg::avcodec_open2(encoder, codec, std::ptr::null_mut());
         }
 
-        let scaler = unsafe {
-            ffmpeg::sws_getContext(
-                CAPTURE_WIDTH as i32,
-                CAPTURE_HEIGHT as i32,
-                ffmpeg::AVPixelFormat::AV_PIX_FMT_BGRA,
-                CAPTURE_WIDTH as i32,
-                CAPTURE_HEIGHT as i32,
-                ffmpeg::AVPixelFormat::AV_PIX_FMT_YUV420P,
-                ffmpeg::SWS_BILINEAR,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-
         Self {
             capturer: VideoCapturer::new(),
             encoder,
-            scaler,
+            pts: 0,
         }
     }
 
     pub fn capture_and_encode(&mut self) -> Vec<u8> {
+        let t = Instant::now();
         let image = self.capturer.capture_frame();
+        println!(
+            "captured frame after {} us",
+            Instant::now().duration_since(t).as_micros()
+        );
 
-        // Allocate the RGB frame for the captured image
-        let mut rgb_frame = unsafe { ffmpeg::av_frame_alloc() };
+        // Allocate the RGB frame for the converted image
+        let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
         unsafe {
-            (*rgb_frame).format = ffmpeg::AVPixelFormat::AV_PIX_FMT_BGRA as i32;
-            (*rgb_frame).width = CAPTURE_WIDTH as i32;
-            (*rgb_frame).height = CAPTURE_HEIGHT as i32;
+            (*yuv_frame).format = ffmpeg::AVPixelFormat::AV_PIX_FMT_YUV420P as i32;
+            (*yuv_frame).width = CAPTURE_WIDTH as i32;
+            (*yuv_frame).height = CAPTURE_HEIGHT as i32;
         };
 
-        if unsafe { ffmpeg::av_frame_get_buffer(rgb_frame, 0) } < 0 {
-            panic!("could not allocate avframe buffer for rgb_frame");
+        if unsafe { ffmpeg::av_frame_get_buffer(yuv_frame, 0) } < 0 {
+            panic!("could not allocate avframe buffer for yuv_frame");
         }
-        if unsafe { ffmpeg::av_frame_make_writable(rgb_frame) } < 0 {
-            panic!("could not make rgb_frame writable");
+        if unsafe { ffmpeg::av_frame_make_writable(yuv_frame) } < 0 {
+            panic!("could not make yuv_frame writable");
         }
 
-        // Copy the image into the frame
-        unsafe { std::ptr::copy(image.as_ptr(), (*rgb_frame).data[0], image.len()) };
+        // Convert the frame into YUV420
+        let mut y_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[0], (*(*yuv_frame).buf[0]).size)
+        };
+        let mut u_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[1], (*(*yuv_frame).buf[0]).size)
+        };
+        let mut v_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[2], (*(*yuv_frame).buf[0]).size)
+        };
 
-        // Convert the frame to YUV420
-        let mut yuv_frame = unsafe { av_frame_alloc() };
-        if unsafe { ffmpeg::sws_scale_frame(self.scaler, yuv_frame, rgb_frame) } < 0 {
-            panic!("failed to scale frame");
+        yuvutils_rs::bgra_to_yuv420(
+            &mut y_plane,
+            unsafe { (*yuv_frame).linesize[0] } as u32,
+            &mut u_plane,
+            unsafe { (*yuv_frame).linesize[1] } as u32,
+            &mut v_plane,
+            unsafe { (*yuv_frame).linesize[2] } as u32,
+            &image,
+            CAPTURE_WIDTH * 4,
+            CAPTURE_WIDTH,
+            CAPTURE_HEIGHT,
+            yuvutils_rs::YuvRange::Full,
+            yuvutils_rs::YuvStandardMatrix::Bt709,
+        );
+
+        // Set the presentation timestamp
+        unsafe {
+            (*yuv_frame).pts = self.pts;
         }
-        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(rgb_frame)) };
+        self.pts += 1;
+
+        println!(
+            "converted frame after {} us",
+            Instant::now().duration_since(t).as_micros()
+        );
 
         // Encode the frame
         if unsafe { ffmpeg::avcodec_send_frame(self.encoder, yuv_frame) } < 0 {
             panic!("failed to submit frame to encoder");
         }
         unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
+
+        println!(
+            "encoded frame after {} us",
+            Instant::now().duration_since(t).as_micros()
+        );
 
         let mut out = vec![];
         let ret = 0;
