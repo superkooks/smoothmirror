@@ -379,6 +379,7 @@ async fn run() {
 
     let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
     tcp_sock.set_nonblocking(true).unwrap();
+    tcp_sock.set_nodelay(true).unwrap();
 
     let mut video_stream = UdpStream::new();
     // let mut video_stream = TcpStream::connect("localhost:9999").unwrap();
@@ -386,6 +387,7 @@ async fn run() {
     let mut last_poll = Instant::now();
 
     // Run the windows event loop
+    let mut t = Instant::now();
     event_loop
         .run(move |event, control_flow| match event {
             Event::WindowEvent {
@@ -430,6 +432,11 @@ async fn run() {
                             let size = window.inner_size();
 
                             // Send the delta position
+                            println!(
+                                "last mouse {} us ago",
+                                Instant::now().duration_since(t).as_micros()
+                            );
+                            t = Instant::now();
                             tcp_sock
                                 .write(
                                     &rmp_serde::to_vec(&KeyEvent::Mouse {

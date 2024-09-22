@@ -46,6 +46,9 @@ fn main() {
         let mut client2 = tcp_sock.accept().unwrap();
         println!("accepted");
 
+        client1.0.set_nodelay(true).unwrap();
+        client2.0.set_nodelay(true).unwrap();
+
         let mut client12 = client1.0.try_clone().unwrap();
         let mut client22 = client2.0.try_clone().unwrap();
 
