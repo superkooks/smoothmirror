@@ -20,10 +20,10 @@ nvidia-video-codec-sdk = { version = "0.3.1", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13.1", features = ["shm", "xfixes"] }
 pulse = { version = "2.28.1", package = "libpulse-binding" }
-ffmpeg-sys-next = { version = "7.0.2", features = ["build"] }
+ffmpeg-sys-next = { version = "7.0.2", features = ["build", "build-license-gpl", "build-lib-x264"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ffmpeg-sys-next = { version = "7.0.2", features = ["build"] }
+ffmpeg-sys-next = { version = "7.0.2", features = ["build", "build-license-gpl", "build-lib-x264"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }
