@@ -2,7 +2,9 @@ use std::{ffi::CString, time::Instant};
 
 use ffmpeg_sys_next as ffmpeg;
 
-use crate::{video_capture::VideoCapturer, CAPTURE_HEIGHT, CAPTURE_WIDTH, FRAME_RATE};
+use crate::{
+    ui::FrameLatencyInfo, video_capture::VideoCapturer, CAPTURE_HEIGHT, CAPTURE_WIDTH, FRAME_RATE,
+};
 
 pub struct VideoEncoder {
     capturer: VideoCapturer,
@@ -48,13 +50,9 @@ impl VideoEncoder {
         }
     }
 
-    pub fn capture_and_encode(&mut self) -> Vec<u8> {
+    pub fn capture_and_encode(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
         let t = Instant::now();
-        let image = self.capturer.capture_frame();
-        println!(
-            "captured frame after {} us",
-            Instant::now().duration_since(t).as_micros()
-        );
+        let (image, mut f) = self.capturer.capture_frame();
 
         // Allocate the RGB frame for the converted image
         let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
@@ -70,6 +68,7 @@ impl VideoEncoder {
         if unsafe { ffmpeg::av_frame_make_writable(yuv_frame) } < 0 {
             panic!("could not make yuv_frame writable");
         }
+        f.measure("avframe allocate");
 
         // Convert the frame into YUV420
         let mut y_plane = unsafe {
@@ -103,10 +102,7 @@ impl VideoEncoder {
         }
         self.pts += 1;
 
-        println!(
-            "converted frame after {} us",
-            Instant::now().duration_since(t).as_micros()
-        );
+        f.measure("yuv conversion");
 
         // Encode the frame
         if unsafe { ffmpeg::avcodec_send_frame(self.encoder, yuv_frame) } < 0 {
@@ -114,10 +110,7 @@ impl VideoEncoder {
         }
         unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
 
-        println!(
-            "encoded frame after {} us",
-            Instant::now().duration_since(t).as_micros()
-        );
+        f.measure("encoded frame");
 
         let mut out = vec![];
         let ret = 0;
@@ -128,7 +121,7 @@ impl VideoEncoder {
 
             if ret == -ffmpeg::EAGAIN {
                 unsafe { ffmpeg::av_packet_free(std::ptr::addr_of_mut!(pkt)) };
-                return out;
+                return (out, f);
             } else if ret < 0 {
                 panic!("failed to receive encoded packet: {}", ret);
             }
@@ -138,7 +131,8 @@ impl VideoEncoder {
 
             unsafe { ffmpeg::av_packet_free(std::ptr::addr_of_mut!(pkt)) };
         }
+        f.measure("received packets");
 
-        return out;
+        (out, f)
     }
 }

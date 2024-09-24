@@ -6,7 +6,9 @@ use nvidia_video_codec_sdk::{
     Bitstream, Buffer, EncodePictureParams, Encoder, Session,
 };
 
-use crate::{video_capture::VideoCapturer, CAPTURE_HEIGHT, CAPTURE_WIDTH, FRAME_RATE};
+use crate::{
+    ui::FrameLatencyInfo, video_capture::VideoCapturer, CAPTURE_HEIGHT, CAPTURE_WIDTH, FRAME_RATE,
+};
 
 pub struct VideoEncoder {
     capturer: VideoCapturer,
@@ -73,12 +75,14 @@ impl VideoEncoder {
         e
     }
 
-    pub fn capture_and_encode(&mut self) -> Vec<u8> {
+    pub fn capture_and_encode(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
         // Capture the image
-        let image = self.capturer.capture_frame();
+        let (image, mut f) = self.capturer.capture_frame();
 
         // Encode the image, writing potentially multiple nalus
         unsafe { self.in_buf.as_mut().unwrap().lock().unwrap().write(&image) };
+        f.measure("in_buf write");
+
         self.session
             .encode_picture(
                 self.in_buf.as_mut().unwrap(),
@@ -86,9 +90,14 @@ impl VideoEncoder {
                 EncodePictureParams::default(),
             )
             .unwrap();
+        f.measure("encode");
 
         let nalus = self.out_bits.as_mut().unwrap().lock().unwrap();
+        f.measure("out_bits_read");
 
-        return nalus.data().to_vec();
+        let b = nalus.data().to_vec();
+        f.measure("nalues to_vec");
+
+        (b, f)
     }
 }

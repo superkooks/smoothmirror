@@ -14,7 +14,9 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
-use crate::{CAPTURE_HEIGHT, CAPTURE_OFFSET_X, CAPTURE_OFFSET_Y, CAPTURE_WIDTH};
+use crate::{
+    ui::FrameLatencyInfo, CAPTURE_HEIGHT, CAPTURE_OFFSET_X, CAPTURE_OFFSET_Y, CAPTURE_WIDTH,
+};
 
 pub struct VideoCapturer {
     xconn: RustConnection,
@@ -51,7 +53,8 @@ impl VideoCapturer {
         }
     }
 
-    pub fn capture_frame(&mut self) -> Vec<u8> {
+    pub fn capture_frame(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
+        let mut f = FrameLatencyInfo::new();
         // Capture screen from x11, using shared memory
         self.xconn
             .shm_get_image(
@@ -69,9 +72,12 @@ impl VideoCapturer {
             .reply()
             .unwrap();
 
+        f.measure("shm_get_image");
+
         let mut image = vec![];
         self.shm_buf.seek(std::io::SeekFrom::Start(0)).unwrap();
         self.shm_buf.read_to_end(&mut image).unwrap();
+        f.measure("shm_buf read");
 
         // Capture cursor
         let cursor = self
@@ -80,6 +86,7 @@ impl VideoCapturer {
             .unwrap()
             .reply()
             .unwrap();
+        f.measure("get_cursor_image");
 
         let ox = cursor.x as i64 - CAPTURE_OFFSET_X as i64;
         let oy = cursor.y as i64 - CAPTURE_OFFSET_Y as i64;
@@ -112,7 +119,8 @@ impl VideoCapturer {
                 }
             }
         }
+        f.measure("composite cursor");
 
-        image
+        (image, f)
     }
 }

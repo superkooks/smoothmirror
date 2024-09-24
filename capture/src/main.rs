@@ -1,6 +1,7 @@
 #![feature(thread_sleep_until)]
 
 mod audio_encode;
+mod ui;
 
 #[cfg_attr(target_os = "linux", path = "audio_linux.rs")]
 #[cfg_attr(target_os = "windows", path = "audio_windows.rs")]
@@ -21,7 +22,9 @@ use std::time::{Duration, Instant};
 use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
 
+use log::info;
 use serde::{Deserialize, Serialize};
+use ui::FrameLatencyInfo;
 use video_encode::VideoEncoder;
 
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
@@ -54,7 +57,7 @@ pub struct Capturer {
 }
 
 pub fn new_encoder() -> Capturer {
-    println!("capture starting");
+    // info!("capture starting");
 
     let audio = AudioEncoder::new();
     let video = VideoEncoder::new();
@@ -63,13 +66,29 @@ pub fn new_encoder() -> Capturer {
 }
 
 fn main() {
+    let (ui, ui_thread) = ui::start_ui();
+    log::set_boxed_logger(Box::new(ui::Logger(ui.clone()))).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
+
     let mut enc = new_encoder();
-    let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
+    info!("waiting for a display client");
+
+    let mut sock = UdpSocket::bind("0.0.0.0:0").unwrap();
     sock.connect("dw.superkooks.com:42069").unwrap();
     sock.send(&vec![0]).unwrap();
-    sock.recv(&mut vec![0]).unwrap();
+    let net_hand = thread::spawn(move || {
+        sock.recv(&mut vec![0]).unwrap();
+        sock
+    });
+    loop {
+        if net_hand.is_finished() {
+            sock = net_hand.join().unwrap();
+            break;
+        } else if ui_thread.is_finished() {
+            return;
+        }
+    }
 
-    println!("waiting for a display client");
     let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
     tcp_sock.set_nodelay(true).unwrap();
 
@@ -110,10 +129,10 @@ fn main() {
                 }
                 KeyEvent::Mouse { x, y } => {
                     // println!("{} {}", x, y);
-                    println!(
-                        "last mouse {} us ago",
-                        Instant::now().duration_since(t).as_micros()
-                    );
+                    // println!(
+                    //     "last mouse {} us ago",
+                    //     Instant::now().duration_since(t).as_micros()
+                    // );
                     t = Instant::now();
                     enigo
                         .move_mouse(x as i32, y as i32, enigo::Coordinate::Rel)
@@ -127,21 +146,29 @@ fn main() {
     // let mut conn = socket.accept().unwrap().0;
 
     sleep(Duration::from_millis(100));
-    println!("got display client");
+    info!("got display client");
 
     // Begin capturing
     let mut cur_seq_video = 0i64;
     let mut cur_seq_audio = 0i64;
     enc.audio.source.uncork();
-    let mut last_video = Instant::now();
 
+    let mut f = FrameLatencyInfo::new();
     loop {
         let loop_start = Instant::now();
+        let mut main_fli = FrameLatencyInfo::new();
+
+        if ui_thread.is_finished() {
+            return;
+        }
 
         // Video
         // println!("capturing...");
         // let mut t = Instant::now();
-        let nalus = enc.video.capture_and_encode();
+        let (nalus, fli) = enc.video.capture_and_encode();
+        main_fli.measure("capture");
+        ui.lock().add_frame_latency_info("frame", fli);
+        main_fli.measure("ui frame fli");
         // println!(
         //     "captured image after {} us",
         //     Instant::now().duration_since(t).as_micros()
@@ -160,17 +187,24 @@ fn main() {
 
             let buf = rmp_serde::to_vec(&m).unwrap();
             sock.send(&buf).unwrap();
+
+            f.measure("last_packet");
+            if f.total() > 2500 {
+                ui.lock().add_frame_latency_info("packet", f);
+                f = FrameLatencyInfo::new();
+            }
             // conn.write_all(&buf).unwrap();
             // println!("sent video packet");
-            println!(
-                "last video {} us ago",
-                Instant::now().duration_since(last_video).as_micros()
-            );
-            last_video = Instant::now();
+            // println!(
+            //     "last video {} us ago",
+            //     Instant::now().duration_since(last_video).as_micros()
+            // );
         }
+        main_fli.measure("packetize video");
 
         // Audio
         let packet = enc.audio.capture_and_encode();
+        main_fli.measure("capture audio");
         if packet.is_some() {
             let m = Msg {
                 seq: cur_seq_audio,
@@ -188,7 +222,10 @@ fn main() {
             // );
             // last_audio = Instant::now();
         }
+        main_fli.measure("packetize audio");
 
         sleep_until(loop_start + FRAME_DURATION);
+        main_fli.measure("sleep");
+        ui.lock().add_frame_latency_info("main_loop", main_fli);
     }
 }
