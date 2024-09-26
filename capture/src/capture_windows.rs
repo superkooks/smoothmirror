@@ -9,7 +9,9 @@ use windows_capture::{
     settings::Settings,
 };
 
-use crate::{CAPTURE_HEIGHT, CAPTURE_OFFSET_X, CAPTURE_OFFSET_Y, CAPTURE_WIDTH};
+use crate::{
+    ui::FrameLatencyInfo, CAPTURE_HEIGHT, CAPTURE_OFFSET_X, CAPTURE_OFFSET_Y, CAPTURE_WIDTH,
+};
 
 pub struct VideoCapturer {
     cur_image: Arc<Mutex<Vec<u8>>>,
@@ -32,8 +34,11 @@ impl VideoCapturer {
         Self { cur_image, control }
     }
 
-    pub fn capture_frame(&mut self) -> Vec<u8> {
-        self.cur_image.lock().unwrap().clone()
+    pub fn capture_frame(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
+        let mut f = FrameLatencyInfo::new();
+        let v = self.cur_image.lock().unwrap().clone();
+        f.measure("cur_image clone");
+        (v, f)
     }
 }
 
@@ -64,10 +69,10 @@ impl GraphicsCaptureApiHandler for CaptureInternal {
             .unwrap()
             .extend_from_slice(frame.buffer().unwrap().as_raw_buffer());
 
-        println!(
-            "{} us since last frame arrived",
-            Instant::now().duration_since(self.t).as_micros()
-        );
+        // println!(
+        //     "{} us since last frame arrived",
+        //     Instant::now().duration_since(self.t).as_micros()
+        // );
         self.t = Instant::now();
 
         Ok(())
