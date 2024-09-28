@@ -29,13 +29,6 @@ ffmpeg-sys-next = { version = "7.0.2", features = [
     "build-lib-x264",
 ] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-ffmpeg-sys-next = { version = "7.0.2", features = [
-    "build",
-    "build-license-gpl",
-    "build-lib-x264",
-] }
-
 [target.'cfg(target_os = "windows")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }
 windows-capture = "1.3.6"
