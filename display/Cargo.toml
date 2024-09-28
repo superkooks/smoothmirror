@@ -25,11 +25,7 @@ ffmpeg-sys-next = { version = "7.0.2", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ffmpeg-sys-next = { version = "7.0.2", features = [
-    "build",
-    "build-license-gpl",
-    "build-lib-x264",
-] }
+ffmpeg-sys-next = { version = "7.0.2", default-features = false, features = ["avcodec", "avdevice", "avfilter", "avformat", "swresample", "swscale"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }
