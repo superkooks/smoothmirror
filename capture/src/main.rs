@@ -167,7 +167,7 @@ fn main() {
         // let mut t = Instant::now();
         let (nalus, fli) = enc.video.capture_and_encode();
         main_fli.measure("capture");
-        ui.lock().add_frame_latency_info("frame", fli);
+        ui.lock().unwrap().add_frame_latency_info("frame", fli);
         main_fli.measure("ui frame fli");
         // println!(
         //     "captured image after {} us",
@@ -190,7 +190,7 @@ fn main() {
 
             f.measure("last_packet");
             if f.total() > 2500 {
-                ui.lock().add_frame_latency_info("packet", f);
+                ui.lock().unwrap().add_frame_latency_info("packet", f);
                 f = FrameLatencyInfo::new();
             }
             // conn.write_all(&buf).unwrap();
@@ -226,6 +226,8 @@ fn main() {
 
         sleep_until(loop_start + FRAME_DURATION);
         main_fli.measure("sleep");
-        ui.lock().add_frame_latency_info("main_loop", main_fli);
+        ui.lock()
+            .unwrap()
+            .add_frame_latency_info("main_loop", main_fli);
     }
 }

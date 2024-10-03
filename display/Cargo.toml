@@ -6,8 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-winit = { version = "0.29", features = ["rwh_05"] }
-wgpu = "0.17.0"
+glium = "0.35.0"
 serde = { version = "1.0", features = ["derive"] }
 rmp-serde = "1.3.0"
 serde_bytes = "0.11.14"
@@ -16,6 +15,7 @@ audiopus = "0.3.0-rc.0"
 pollster = "0.3"
 async-std = "1.12.0"
 socket2 = "0.5.7"
+yuvutils-rs = "0.4.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = [
@@ -25,7 +25,14 @@ ffmpeg-sys-next = { version = "7.0.2", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ffmpeg-sys-next = { version = "7.0.2", default-features = false, features = ["avcodec", "avdevice", "avfilter", "avformat", "swresample", "swscale"] }
+ffmpeg-sys-next = { version = "7.0.2", default-features = false, features = [
+    "avcodec",
+    "avdevice",
+    "avfilter",
+    "avformat",
+    "swresample",
+    "swscale",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }

@@ -1,13 +1,12 @@
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, stdout},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Instant,
 };
 
 use log::Level;
-use parking_lot::Mutex;
 
 use ratatui::{
     crossterm::{
@@ -72,13 +71,13 @@ pub fn start_ui() -> (Arc<Mutex<UI>>, JoinHandle<()>) {
         let mut term = Terminal::new(CrosstermBackend::new(stdout())).unwrap();
         loop {
             term.draw(|frame| {
-                let mut u = { ui.lock().clone() };
+                let mut u = { ui.lock().unwrap().clone() };
                 u.draw(frame)
             })
             .unwrap();
 
             if event::poll(std::time::Duration::from_millis(10)).unwrap() {
-                if ui.lock().handle_events().unwrap() {
+                if ui.lock().unwrap().handle_events().unwrap() {
                     disable_raw_mode().unwrap();
                     stdout().execute(LeaveAlternateScreen).unwrap();
                     return;
@@ -182,7 +181,7 @@ impl log::Log for Logger {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            let mut guard = self.0.lock();
+            let mut guard = self.0.lock().unwrap();
             guard.log += &format!("{}", record.args());
             guard.log += "\n";
         }

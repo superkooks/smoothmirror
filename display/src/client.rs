@@ -6,9 +6,9 @@ use std::{
 
 use audiopus::{packet::Packet, MutSignals};
 use ffmpeg_sys_next::{self as ffmpeg};
+use glium::winit::event_loop::EventLoopProxy;
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
-use winit::dpi::PhysicalSize;
 
 use crate::{ENCODED_HEIGHT, ENCODED_WIDTH, FRAME_DURATION};
 
@@ -16,26 +16,22 @@ use crate::{ENCODED_HEIGHT, ENCODED_WIDTH, FRAME_DURATION};
 struct FFMPEGLater {
     decoder: *mut ffmpeg::AVCodecContext,
     parser: *mut ffmpeg::AVCodecParserContext,
-    scaler: *mut ffmpeg::SwsContext,
 }
 
 pub struct Client {
-    size: PhysicalSize<u32>,
     ff: Option<FFMPEGLater>,
     audio_decoder: audiopus::coder::Decoder,
     decoded_audio: Arc<Mutex<Vec<f32>>>,
-    image: Arc<Mutex<Vec<u8>>>,
+    el_proxy: EventLoopProxy<Vec<u8>>,
 }
 
 unsafe impl Send for Client {}
 
 pub fn init_client(
-    size: PhysicalSize<u32>,
     decoded_audio: Arc<Mutex<Vec<f32>>>,
-    image: Arc<Mutex<Vec<u8>>>,
+    el_proxy: EventLoopProxy<Vec<u8>>,
 ) -> Client {
     Client {
-        size,
         ff: None,
         audio_decoder: audiopus::coder::Decoder::new(
             audiopus::SampleRate::Hz48000,
@@ -43,7 +39,7 @@ pub fn init_client(
         )
         .unwrap(),
         decoded_audio,
-        image,
+        el_proxy,
     }
 }
 
@@ -63,7 +59,7 @@ impl Client {
         );
         t = Instant::now();
 
-        let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
+        let yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
         let res2 = unsafe { ffmpeg::avcodec_receive_frame(self.ff.unwrap().decoder, yuv_frame) };
         println!("receive_frame={}", res2);
 
@@ -71,25 +67,55 @@ impl Client {
             return;
         }
 
-        let mut rgb_frame = unsafe { ffmpeg::av_frame_alloc() };
-        let res3 =
-            unsafe { ffmpeg::sws_scale_frame(self.ff.unwrap().scaler, rgb_frame, yuv_frame) };
-        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
-        println!("sws_scale_frame={}", res3);
+        // Convert frame to rgb
+        let mut y_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[0], (*(*yuv_frame).buf[0]).size)
+        };
+        let mut u_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[1], (*(*yuv_frame).buf[0]).size)
+        };
+        let mut v_plane = unsafe {
+            std::slice::from_raw_parts_mut((*yuv_frame).data[2], (*(*yuv_frame).buf[0]).size)
+        };
+
+        let mut image = vec![0; (ENCODED_WIDTH * ENCODED_HEIGHT * 4) as usize];
+
+        yuvutils_rs::yuv420_to_rgba(
+            &mut y_plane,
+            unsafe { (*yuv_frame).linesize[0] } as u32,
+            &mut u_plane,
+            unsafe { (*yuv_frame).linesize[1] } as u32,
+            &mut v_plane,
+            unsafe { (*yuv_frame).linesize[2] } as u32,
+            &mut image,
+            4 * ENCODED_WIDTH,
+            ENCODED_WIDTH,
+            ENCODED_HEIGHT,
+            yuvutils_rs::YuvRange::Full,
+            yuvutils_rs::YuvStandardMatrix::Bt709,
+        );
+
+        // let mut rgb_frame = unsafe { ffmpeg::av_frame_alloc() };
+        // let res3 =
+        //     unsafe { ffmpeg::sws_scale_frame(self.ff.unwrap().scaler, rgb_frame, yuv_frame) };
+        // unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
+        // println!("sws_scale_frame={}", res3);
         println!(
             "took {} us to convert",
             Instant::now().duration_since(t).as_micros()
         );
         t = Instant::now();
 
-        let img = unsafe {
-            std::slice::from_raw_parts((*rgb_frame).data[0], (*(*rgb_frame).buf[0]).size)
-        };
+        // let img = unsafe {
+        //     std::slice::from_raw_parts((*rgb_frame).data[0], (*(*rgb_frame).buf[0]).size)
+        // };
 
-        self.image.lock().unwrap().clear();
-        self.image.lock().unwrap().extend_from_slice(img);
+        // self.image.lock().unwrap().clear();
+        // self.image.lock().unwrap().extend_from_slice(img);
 
-        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(rgb_frame)) };
+        // unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(rgb_frame)) };
+
+        self.el_proxy.send_event(image).unwrap();
 
         println!(
             "took {} us to finish consuming nalus",
@@ -138,26 +164,7 @@ impl Client {
             ffmpeg::avcodec_open2(decoder, codec, std::ptr::null_mut());
         }
 
-        let scaler = unsafe {
-            ffmpeg::sws_getContext(
-                ENCODED_WIDTH as i32,
-                ENCODED_HEIGHT as i32,
-                ffmpeg::AVPixelFormat::AV_PIX_FMT_YUV420P,
-                self.size.width as i32,
-                self.size.height as i32,
-                ffmpeg::AVPixelFormat::AV_PIX_FMT_BGRA,
-                ffmpeg::SWS_BILINEAR,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-
-        self.ff = Some(FFMPEGLater {
-            decoder,
-            scaler,
-            parser,
-        });
+        self.ff = Some(FFMPEGLater { decoder, parser });
     }
 
     pub fn run(&mut self, tcp_sock: TcpStream) {
@@ -179,9 +186,15 @@ impl Client {
 
         let mut video_stream = UdpStream::new();
 
+        let mut t = Instant::now();
         loop {
+            println!(
+                "Reading packets again after {} us",
+                Instant::now().duration_since(t).as_micros()
+            );
             let mut buf = vec![0; 2048];
             sock.recv(&mut buf).unwrap();
+            t = Instant::now();
 
             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
             if msg.is_audio {

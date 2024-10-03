@@ -2,23 +2,34 @@ use std::{
     io::Write,
     net::TcpStream,
     sync::{Arc, Mutex},
-    thread,
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 
-use async_std::task::sleep;
 use client::init_client;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
-use serde::{Deserialize, Serialize};
-use winit::{
-    dpi::{PhysicalPosition, PhysicalSize, Size},
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder},
+use glium::{
+    backend::winit::{
+        dpi::PhysicalPosition,
+        event::WindowEvent,
+        event_loop::{ControlFlow, EventLoop},
+        window::Window,
+    },
+    glutin::surface::WindowSurface,
+    index::NoIndices,
+    texture::RawImage2d,
+    uniform,
+    vertex::VerticesSource,
+    winit::{
+        application::ApplicationHandler,
+        event::{ElementState, MouseButton},
+    },
+    Display, Surface,
 };
+use serde::{Deserialize, Serialize};
 
 mod client;
 
@@ -33,105 +44,183 @@ enum KeyEvent {
     Click { button: i32, state: bool },
 }
 
-struct Display {
-    queue: wgpu::Queue,
-    surface: wgpu::Surface,
+struct AppDisplay {
+    tcp_sock: TcpStream,
+    window: Window,
+    display: Display<WindowSurface>,
+
+    texture: glium::Texture2d,
+    program: glium::Program,
+
+    tredraw: Instant,
 }
 
-async fn init_display(window: &Window) -> Display {
-    // Init graphics
-    let size = window.inner_size();
+impl AppDisplay {
+    fn new(window: Window, display: Display<WindowSurface>, tcp_sock: TcpStream) -> Self {
+        let texture = glium::Texture2d::empty(&display, ENCODED_WIDTH, ENCODED_HEIGHT).unwrap();
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-
-    let surface = unsafe { instance.create_surface(window) }.unwrap();
-
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-        })
-        .await
-        .unwrap();
-
-    let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
-                limits: wgpu::Limits::default(),
-                label: None,
-            },
+        let program = glium::Program::from_source(
+            &display,
+            include_str!("simple.vert"),
+            include_str!("simple.frag"),
             None,
         )
-        .await
         .unwrap();
 
-    let surface_caps = surface.get_capabilities(&adapter);
-    let surface_format = surface_caps
-        .formats
-        .iter()
-        .find(|f| f.is_srgb())
-        .copied()
-        .unwrap_or(surface_caps.formats[0]);
+        AppDisplay {
+            window,
+            display,
+            tcp_sock,
 
-    println!("using surface format {:?}", surface_format);
+            texture,
+            program,
 
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::COPY_DST,
-        format: surface_format,
-        width: size.width,
-        height: size.height,
-        present_mode: surface_caps.present_modes[0],
-        alpha_mode: surface_caps.alpha_modes[0],
-        view_formats: vec![],
-    };
-
-    surface.configure(&device, &config);
-
-    println!(
-        "texture has width {:?} for screen width {:?}",
-        surface.get_current_texture().unwrap().texture.width(),
-        size.width
-    );
-
-    Display { queue, surface }
-}
-
-impl Display {
-    fn display_frame(&mut self, frame: &[u8]) {
-        if frame.len() == 0 {
-            return;
+            tredraw: Instant::now(),
         }
-
-        let output = self.surface.get_current_texture().unwrap();
-
-        self.queue.write_texture(
-            wgpu::ImageCopyTextureBase {
-                texture: &output.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            frame,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * output.texture.width()),
-                rows_per_image: Some(output.texture.height()),
-            },
-            wgpu::Extent3d {
-                width: output.texture.width(),
-                height: output.texture.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.queue.submit(std::iter::empty());
-        output.present();
     }
 }
 
-async fn run() {
+impl ApplicationHandler<Vec<u8>> for AppDisplay {
+    fn resumed(&mut self, _event_loop: &glium::winit::event_loop::ActiveEventLoop) {}
+
+    fn user_event(
+        &mut self,
+        _event_loop: &glium::winit::event_loop::ActiveEventLoop,
+        event: Vec<u8>,
+    ) {
+        // Write image to texture
+        let t = Instant::now();
+        self.texture = glium::Texture2d::with_mipmaps(
+            &self.display,
+            RawImage2d::from_raw_rgba(event, (ENCODED_WIDTH, ENCODED_HEIGHT)),
+            glium::texture::MipmapsOption::NoMipmap,
+        )
+        .unwrap();
+        println!(
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  written image to texture after {} us",
+            Instant::now().duration_since(t).as_micros()
+        );
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &glium::winit::event_loop::ActiveEventLoop) {
+        if Instant::now().duration_since(self.tredraw) > FRAME_DURATION {
+            self.window.request_redraw();
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &glium::winit::event_loop::ActiveEventLoop,
+        window_id: glium::winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        if window_id == self.window.id() {
+            match event {
+                WindowEvent::CloseRequested => {
+                    event_loop.exit();
+                }
+                WindowEvent::Resized(_) => {}
+                WindowEvent::KeyboardInput {
+                    device_id: _,
+                    event,
+                    is_synthetic: _,
+                } => {
+                    println!("got keyboard event {:?}", event.physical_key);
+                    let key_text = event.logical_key.to_text();
+                    match key_text {
+                        Some(t) => {
+                            self.tcp_sock
+                                .write(
+                                    &rmp_serde::to_vec(&KeyEvent::Key {
+                                        letter: t.chars().nth(0).unwrap(),
+                                        state: match event.state {
+                                            ElementState::Pressed => true,
+                                            ElementState::Released => false,
+                                        },
+                                    })
+                                    .unwrap(),
+                                )
+                                .unwrap();
+                        }
+                        None => {}
+                    }
+                }
+                WindowEvent::CursorMoved {
+                    device_id: _,
+                    position,
+                } => {
+                    let size = self.window.inner_size();
+
+                    // Send the delta position
+                    self.tcp_sock
+                        .write(
+                            &rmp_serde::to_vec(&KeyEvent::Mouse {
+                                x: position.x - size.width as f64 / 2.,
+                                y: position.y - size.height as f64 / 2.,
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+
+                    // Reset the position of the mouse to the centre
+                    self.window
+                        .set_cursor_position(PhysicalPosition::new(size.width / 2, size.height / 2))
+                        .unwrap();
+                }
+                WindowEvent::MouseInput {
+                    device_id: _,
+                    state,
+                    button,
+                } => {
+                    let but = match button {
+                        MouseButton::Left => 0,
+                        MouseButton::Middle => 1,
+                        MouseButton::Right => 2,
+                        _ => 3,
+                    };
+                    if but < 3 {
+                        self.tcp_sock
+                            .write(
+                                &rmp_serde::to_vec(&KeyEvent::Click {
+                                    button: but,
+                                    state: state.is_pressed(),
+                                })
+                                .unwrap(),
+                            )
+                            .unwrap();
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    println!(
+                        "redrawing after {} us",
+                        Instant::now().duration_since(self.tredraw).as_micros()
+                    );
+                    self.tredraw = Instant::now();
+
+                    println!("*****************************  redrawing");
+
+                    let mut target = self.display.draw();
+                    target
+                        .draw(
+                            VerticesSource::Marker {
+                                len: 3,
+                                per_instance: false,
+                            },
+                            NoIndices(glium::index::PrimitiveType::TrianglesList),
+                            &self.program,
+                            &uniform! {frag_tex: self.texture.sampled()},
+                            &glium::DrawParameters::default(),
+                        )
+                        .unwrap();
+                    target.finish().unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn main() {
     // Create audio stream on main thread
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
@@ -163,153 +252,31 @@ async fn run() {
     // stream.play().unwrap();
 
     // Create window
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::<Vec<u8>>::with_user_event().build().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let (window, display) = glium::backend::glutin::SimpleWindowBuilder::new()
+        .with_inner_size(1920, 1080)
+        .build(&event_loop);
+
     window.set_resizable(false);
     window.set_cursor_visible(false);
 
-    let _ = window.request_inner_size(Size::Physical(PhysicalSize {
-        width: 1920,
-        height: 1080,
-    }));
-
     // Pray that the window changes size
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(100));
 
-    let image = Arc::new(Mutex::new(vec![]));
-    let mut d = init_display(&window).await;
-    let mut c = init_client(window.inner_size(), decoded_audio, image.clone());
+    let mut c = init_client(decoded_audio, event_loop.create_proxy());
 
-    let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
+    let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
     let ts = tcp_sock.try_clone().unwrap();
     thread::spawn(move || {
         c.init();
         c.run(ts)
     });
 
+    let mut d = AppDisplay::new(window, display, tcp_sock);
+
     // let mut video_stream = TcpStream::connect("localhost:9999").unwrap();
 
-    // Run the windows event loop
-    let mut t = Instant::now();
-    let mut tredraw = Instant::now();
-    event_loop
-        .run(move |event, control_flow| {
-            if Instant::now().duration_since(tredraw) > FRAME_DURATION {
-                window.request_redraw();
-            }
-            match event {
-                Event::WindowEvent {
-                    window_id,
-                    ref event,
-                } => {
-                    if window_id == window.id() {
-                        match event {
-                            WindowEvent::CloseRequested => {
-                                control_flow.exit();
-                            }
-                            WindowEvent::Resized(_) => {}
-                            WindowEvent::KeyboardInput {
-                                device_id: _,
-                                event,
-                                is_synthetic: _,
-                            } => {
-                                println!("got keyboard event {:?}", event.physical_key);
-                                let key_text = event.logical_key.to_text();
-                                match key_text {
-                                    Some(t) => {
-                                        tcp_sock
-                                            .write(
-                                                &rmp_serde::to_vec(&KeyEvent::Key {
-                                                    letter: t.chars().nth(0).unwrap(),
-                                                    state: match event.state {
-                                                        winit::event::ElementState::Pressed => true,
-                                                        winit::event::ElementState::Released => {
-                                                            false
-                                                        }
-                                                    },
-                                                })
-                                                .unwrap(),
-                                            )
-                                            .unwrap();
-                                    }
-                                    None => {}
-                                }
-                            }
-                            WindowEvent::CursorMoved {
-                                device_id: _,
-                                position,
-                            } => {
-                                let size = window.inner_size();
-
-                                // Send the delta position
-                                println!(
-                                    "last mouse {} us ago",
-                                    Instant::now().duration_since(t).as_micros()
-                                );
-                                t = Instant::now();
-                                tcp_sock
-                                    .write(
-                                        &rmp_serde::to_vec(&KeyEvent::Mouse {
-                                            x: position.x - size.width as f64 / 2.,
-                                            y: position.y - size.height as f64 / 2.,
-                                        })
-                                        .unwrap(),
-                                    )
-                                    .unwrap();
-
-                                // Reset the position of the mouse to the centre
-                                window
-                                    .set_cursor_position(PhysicalPosition::new(
-                                        size.width / 2,
-                                        size.height / 2,
-                                    ))
-                                    .unwrap();
-                            }
-                            WindowEvent::MouseInput {
-                                device_id: _,
-                                state,
-                                button,
-                            } => {
-                                let but = match button {
-                                    winit::event::MouseButton::Left => 0,
-                                    winit::event::MouseButton::Middle => 1,
-                                    winit::event::MouseButton::Right => 2,
-                                    _ => 3,
-                                };
-                                if but < 3 {
-                                    tcp_sock
-                                        .write(
-                                            &rmp_serde::to_vec(&KeyEvent::Click {
-                                                button: but,
-                                                state: state.is_pressed(),
-                                            })
-                                            .unwrap(),
-                                        )
-                                        .unwrap();
-                                }
-                            }
-                            WindowEvent::RedrawRequested => {
-                                println!(
-                                    "redrawing after {} us",
-                                    Instant::now().duration_since(tredraw).as_micros()
-                                );
-                                tredraw = Instant::now();
-                                d.display_frame(&image.lock().unwrap());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Event::AboutToWait => {
-                    // window.request_redraw();
-                }
-                _ => {}
-            }
-        })
-        .unwrap();
-}
-
-fn main() {
-    pollster::block_on(run());
+    // Run the event loop
+    event_loop.run_app(&mut d).unwrap();
 }
