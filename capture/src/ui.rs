@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use log::Level;
+use log::{info, Level};
 
 use ratatui::{
     crossterm::{
@@ -157,7 +157,12 @@ impl UI {
         }
 
         frame.render_widget(
-            Paragraph::new(self.log.clone()).block(Block::bordered().title("Log")),
+            Paragraph::new(self.log.clone())
+                .block(Block::bordered().title("Log"))
+                .scroll((
+                    (self.log.split('\n').count() as i32 - layout[2].height as i32).max(0) as u16,
+                    0,
+                )),
             layout[2],
         );
     }

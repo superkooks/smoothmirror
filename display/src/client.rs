@@ -176,12 +176,11 @@ impl Client {
         let sock_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         socket.bind(&sock_addr.into()).unwrap();
 
-        let sock: UdpSocket = socket.into();
+        let mut sock: UdpSocket = socket.into();
         sock.connect("dw.superkooks.com:42069").unwrap();
         sock.send(&vec![1]).unwrap();
         sock.recv(&mut vec![0]).unwrap();
 
-        tcp_sock.set_nonblocking(true).unwrap();
         tcp_sock.set_nodelay(true).unwrap();
 
         let mut video_stream = UdpStream::new();
@@ -211,7 +210,7 @@ impl Client {
                     .unwrap()
                     .extend_from_slice(&output);
             } else {
-                for msg in video_stream.recv(msg) {
+                for msg in video_stream.recv(msg, &mut sock) {
                     self.accumulate_nalus(&msg.data);
                 }
             }
@@ -232,6 +231,7 @@ struct UdpStream {
     next_seq: i64,
     last_in_seq: Instant,
     rearrange_buf: Vec<Msg>,
+    nacked_seq: i64,
 }
 
 impl UdpStream {
@@ -240,23 +240,42 @@ impl UdpStream {
             next_seq: 0,
             last_in_seq: Instant::now(),
             rearrange_buf: vec![],
+            nacked_seq: 0,
         };
     }
 
-    fn recv(&mut self, msg: Msg) -> Vec<Msg> {
+    fn recv(&mut self, msg: Msg, udp_sock: &mut UdpSocket) -> Vec<Msg> {
         let mut out = vec![];
 
         if Instant::now().duration_since(self.last_in_seq).as_micros()
-            > FRAME_DURATION.as_micros() * 2
+            > FRAME_DURATION.as_micros() * 50
             && msg.seq - self.next_seq > 1
         {
-            self.next_seq += 2;
+            self.next_seq = msg.seq;
         }
 
         if msg.seq != self.next_seq {
             // Add it to the rearrange buf
+            println!(
+                "storing packet {:?} instead of {:?} in rearrange buf (sending nack > {:?})",
+                msg.seq, self.next_seq, self.nacked_seq
+            );
+
+            for i in self.next_seq.max(self.nacked_seq)..msg.seq {
+                udp_sock
+                    .send(
+                        &rmp_serde::to_vec(&Msg {
+                            seq: i,
+                            is_audio: false,
+                            data: vec![],
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            self.nacked_seq = msg.seq;
+
             self.rearrange_buf.push(msg);
-            println!("storing packet in rearrange buf")
         } else {
             // Write it
             out.push(msg);
