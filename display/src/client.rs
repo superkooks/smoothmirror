@@ -59,7 +59,7 @@ impl Client {
         );
         t = Instant::now();
 
-        let yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
+        let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };
         let res2 = unsafe { ffmpeg::avcodec_receive_frame(self.ff.unwrap().decoder, yuv_frame) };
         println!("receive_frame={}", res2);
 
@@ -98,7 +98,7 @@ impl Client {
         // let mut rgb_frame = unsafe { ffmpeg::av_frame_alloc() };
         // let res3 =
         //     unsafe { ffmpeg::sws_scale_frame(self.ff.unwrap().scaler, rgb_frame, yuv_frame) };
-        // unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
+        unsafe { ffmpeg::av_frame_free(std::ptr::addr_of_mut!(yuv_frame)) };
         // println!("sws_scale_frame={}", res3);
         println!(
             "took {} us to convert",

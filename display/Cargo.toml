@@ -16,6 +16,7 @@ pollster = "0.3"
 async-std = "1.12.0"
 socket2 = "0.5.7"
 yuvutils-rs = "0.4.6"
+gilrs = { version = "0.11.0", features = ["serde-serialize"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = [

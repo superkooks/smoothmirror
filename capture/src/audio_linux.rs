@@ -134,7 +134,7 @@ fn wait_until_stream_ready(
         match stream.borrow().get_state() {
             pulse::stream::State::Ready => break,
             pulse::stream::State::Failed | pulse::stream::State::Terminated => {
-                panic!("pulseaudio stream is failed")
+                // panic!("pulseaudio stream is failed")
             }
             _ => {}
         }

@@ -11,6 +11,8 @@ mod audio_capture;
 #[cfg_attr(target_os = "windows", path = "capture_windows.rs")]
 mod video_capture;
 
+#[cfg(target_os = "linux")]
+mod gamepad_linux;
 #[cfg_attr(feature = "nvenc", path = "encode_nvidia.rs")]
 #[cfg_attr(not(feature = "nvenc"), path = "encode_ffmpeg.rs")]
 mod video_encode;
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant};
 use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
 
+use gamepad_linux::GamepadEmulator;
 use log::info;
 use serde::{Deserialize, Serialize};
 use ui::FrameLatencyInfo;
@@ -49,6 +52,8 @@ enum KeyEvent {
     Key { letter: char, state: bool },
     Mouse { x: f64, y: f64 },
     Click { button: i32, state: bool },
+    GamepadButton { button: gilrs::Button, state: u8 },
+    GamepadAxis { axis: gilrs::Axis, state: f32 },
 }
 
 pub struct Capturer {
@@ -69,6 +74,8 @@ fn main() {
     let (ui, ui_thread) = ui::start_ui();
     log::set_boxed_logger(Box::new(ui::Logger(ui.clone()))).unwrap();
     log::set_max_level(log::LevelFilter::Info);
+
+    let mut gpe = GamepadEmulator::new();
 
     let mut enc = new_encoder();
     info!("waiting for a display client");
@@ -137,6 +144,9 @@ fn main() {
                     enigo
                         .move_mouse(x as i32, y as i32, enigo::Coordinate::Rel)
                         .unwrap();
+                }
+                _ => {
+                    gpe.send_gamepad_event(ev);
                 }
             }
         }

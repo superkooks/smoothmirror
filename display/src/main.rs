@@ -2,7 +2,7 @@ use std::{
     io::Write,
     net::TcpStream,
     sync::{Arc, Mutex},
-    thread::{self, sleep},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -11,6 +11,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
+use gilrs::Gilrs;
 use glium::{
     backend::winit::{
         dpi::PhysicalPosition,
@@ -42,6 +43,8 @@ enum KeyEvent {
     Key { letter: char, state: bool },
     Mouse { x: f64, y: f64 },
     Click { button: i32, state: bool },
+    GamepadButton { button: gilrs::Button, state: u8 },
+    GamepadAxis { axis: gilrs::Axis, state: f32 },
 }
 
 struct AppDisplay {
@@ -261,16 +264,57 @@ fn main() {
     window.set_resizable(false);
     window.set_cursor_visible(false);
 
-    // Pray that the window changes size
-    sleep(Duration::from_millis(100));
-
     let mut c = init_client(decoded_audio, event_loop.create_proxy());
 
     let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
-    let ts = tcp_sock.try_clone().unwrap();
+    let cts = tcp_sock.try_clone().unwrap();
+    let mut gts = tcp_sock.try_clone().unwrap();
     thread::spawn(move || {
         c.init();
-        c.run(ts)
+        c.run(cts)
+    });
+
+    thread::spawn(move || {
+        let mut gilrs = Gilrs::new().unwrap();
+        loop {
+            while let Some(ev) = gilrs.next_event() {
+                match ev.event {
+                    gilrs::EventType::ButtonPressed(button, _code) => {
+                        gts.write(
+                            &rmp_serde::to_vec(&KeyEvent::GamepadButton { button, state: 1 })
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    gilrs::EventType::ButtonReleased(button, _code) => {
+                        gts.write(
+                            &rmp_serde::to_vec(&KeyEvent::GamepadButton { button, state: 0 })
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    gilrs::EventType::ButtonChanged(button, state, _code) => {
+                        let axis = match button {
+                            gilrs::Button::LeftTrigger2 => gilrs::Axis::LeftZ,
+                            gilrs::Button::RightTrigger2 => gilrs::Axis::RightZ,
+                            _ => gilrs::Axis::Unknown,
+                        };
+                        gts.write(
+                            &rmp_serde::to_vec(&KeyEvent::GamepadAxis { axis, state }).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    gilrs::EventType::AxisChanged(axis, state, _code) => {
+                        gts.write(
+                            &rmp_serde::to_vec(&KeyEvent::GamepadAxis { axis, state }).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                    _ => {}
+                };
+                // println!("{:?} New event from {}: {:?}", time, id, event);
+            }
+        }
     });
 
     let mut d = AppDisplay::new(window, display, tcp_sock);
