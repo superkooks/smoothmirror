@@ -63,15 +63,13 @@ fn main() {
         let (size, from) = sock.recv_from(&mut buf).unwrap();
 
         let msg: Msg = rmp_serde::from_slice(&buf[..size]).unwrap();
-        if !msg.is_audio {
-            if msg.seq != next_seq {
-                println!(
-                    "missing packet from capture {} instead of {}",
-                    msg.seq, next_seq
-                );
-            }
-            next_seq = msg.seq + 1;
+        if msg.seq != next_seq {
+            println!(
+                "missing packet from capture {} instead of {}",
+                msg.seq, next_seq
+            );
         }
+        next_seq = msg.seq + 1;
 
         if from == display.unwrap() {
             sock.send_to(&buf[..size], capture.unwrap()).unwrap();

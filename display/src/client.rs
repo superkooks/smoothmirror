@@ -183,7 +183,7 @@ impl Client {
 
         tcp_sock.set_nodelay(true).unwrap();
 
-        let mut video_stream = UdpStream::new();
+        let mut udp_stream = UdpStream::new();
 
         let mut t = Instant::now();
         loop {
@@ -196,21 +196,21 @@ impl Client {
             t = Instant::now();
 
             let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
-            if msg.is_audio {
-                let mut output = vec![0f32; 1920 * 4];
-                self.audio_decoder
-                    .decode_float(
-                        Some(Packet::try_from(&msg.data).unwrap()),
-                        MutSignals::try_from(&mut output).unwrap(),
-                        false,
-                    )
-                    .unwrap();
-                self.decoded_audio
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(&output);
-            } else {
-                for msg in video_stream.recv(msg, &mut sock) {
+            for msg in udp_stream.recv(msg, &mut sock) {
+                if msg.is_audio {
+                    let mut output = vec![0f32; 1920 * 4];
+                    self.audio_decoder
+                        .decode_float(
+                            Some(Packet::try_from(&msg.data).unwrap()),
+                            MutSignals::try_from(&mut output).unwrap(),
+                            false,
+                        )
+                        .unwrap();
+                    self.decoded_audio
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&output);
+                } else {
                     self.accumulate_nalus(&msg.data);
                 }
             }

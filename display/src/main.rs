@@ -230,29 +230,29 @@ fn main() {
     let decoded_audio = Arc::new(Mutex::new(vec![]));
     let decoded_audio_cb = decoded_audio.clone();
 
-    // let stream = device
-    //     .build_output_stream(
-    //         &StreamConfig {
-    //             sample_rate: SampleRate(48000),
-    //             channels: 2,
-    //             buffer_size: cpal::BufferSize::Default,
-    //         },
-    //         move |data: &mut [f32], &_| {
-    //             if decoded_audio_cb.lock().unwrap().len() >= data.len() {
-    //                 data.copy_from_slice(&decoded_audio_cb.lock().unwrap()[0..data.len()]);
-    //                 decoded_audio_cb.lock().unwrap().drain(0..data.len());
-    //             } else {
-    //                 data.fill(Sample::EQUILIBRIUM);
-    //             }
-    //         },
-    //         move |err| {
-    //             panic!("{}", err);
-    //         },
-    //         None,
-    //     )
-    //     .unwrap();
+    let stream = device
+        .build_output_stream(
+            &StreamConfig {
+                sample_rate: SampleRate(48000),
+                channels: 2,
+                buffer_size: cpal::BufferSize::Default,
+            },
+            move |data: &mut [f32], &_| {
+                if decoded_audio_cb.lock().unwrap().len() >= data.len() {
+                    data.copy_from_slice(&decoded_audio_cb.lock().unwrap()[0..data.len()]);
+                    decoded_audio_cb.lock().unwrap().drain(0..data.len());
+                } else {
+                    data.fill(Sample::EQUILIBRIUM);
+                }
+            },
+            move |err| {
+                panic!("{}", err);
+            },
+            None,
+        )
+        .unwrap();
 
-    // stream.play().unwrap();
+    stream.play().unwrap();
 
     // Create window
     let event_loop = EventLoop::<Vec<u8>>::with_user_event().build().unwrap();

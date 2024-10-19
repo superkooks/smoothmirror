@@ -21,8 +21,7 @@ pub struct UdpStream {
     sock: UdpSocket,
     history: VecDeque<(Msg, Instant)>,
 
-    cur_seq_video: i64,
-    cur_seq_audio: i64,
+    cur_seq: i64,
 }
 
 impl UdpStream {
@@ -30,29 +29,18 @@ impl UdpStream {
         Self {
             sock,
             history: VecDeque::new(),
-            cur_seq_audio: 0,
-            cur_seq_video: 0,
+            cur_seq: 0,
         }
     }
 
     pub fn send_packet(&mut self, data: Vec<u8>, is_audio: bool) {
         // Create msg struct and increment seq numbers
-        let msg;
-        if is_audio {
-            msg = Msg {
-                seq: self.cur_seq_audio,
-                is_audio,
-                data,
-            };
-            self.cur_seq_audio += 1;
-        } else {
-            msg = Msg {
-                seq: self.cur_seq_video,
-                is_audio,
-                data,
-            };
-            self.cur_seq_video += 1;
-        }
+        let msg = Msg {
+            seq: self.cur_seq,
+            is_audio,
+            data,
+        };
+        self.cur_seq += 1;
 
         // Serialize and send
         let buf = rmp_serde::to_vec(&msg).unwrap();
@@ -80,7 +68,7 @@ impl UdpStream {
                 self.sock.send(&buf).unwrap();
             }
             None => {
-                // Can't find it, don't both
+                // Can't find it, don't bother
                 log::info!("couldn't find packet {:?} in history", seq);
             }
         }
