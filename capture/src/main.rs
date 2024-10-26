@@ -11,8 +11,12 @@ mod audio_capture;
 #[cfg_attr(target_os = "windows", path = "capture_windows.rs")]
 mod video_capture;
 
-#[cfg(target_os = "linux")]
-mod gamepad_linux;
+#[cfg(all(not(target_os = "linux"), feature = "gamepad_emulation"))]
+compile_error!("cannot compile with gamepad emulation for non-linux targets");
+
+#[cfg_attr(feature = "gamepad_emulation", path = "gamepad_linux.rs")]
+#[cfg_attr(not(feature = "gamepad_emulation"), path = "gamepad_noop.rs")]
+mod gamepad;
 
 mod udp;
 
@@ -28,7 +32,7 @@ use std::time::{Duration, Instant};
 use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
 
-use gamepad_linux::GamepadEmulator;
+use gamepad::GamepadEmulator;
 use log::info;
 use serde::{Deserialize, Serialize};
 use udp::{Msg, UdpStream};
