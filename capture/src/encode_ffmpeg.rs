@@ -26,12 +26,14 @@ impl VideoEncoder {
             (*encoder).framerate.num = FRAME_RATE as i32;
             (*encoder).framerate.den = 1;
             (*encoder).bit_rate = 8 << 20;
+            (*encoder).rc_max_rate = 12 << 20;
+            (*encoder).rc_buffer_size = (12 << 20) / 60;
             (*encoder).width = CAPTURE_WIDTH as i32;
             (*encoder).height = CAPTURE_HEIGHT as i32;
             (*encoder).pix_fmt = ffmpeg::AVPixelFormat::AV_PIX_FMT_YUV420P;
 
             let name = CString::new("preset").unwrap();
-            let val = CString::new("ultrafast").unwrap();
+            let val = CString::new("fast").unwrap();
             ffmpeg::av_opt_set((*encoder).priv_data, name.as_ptr(), val.as_ptr(), 0);
 
             let name = CString::new("tune").unwrap();

@@ -31,6 +31,7 @@ impl VideoEncoder {
             nvidia_video_codec_sdk::sys::nvEncodeAPI::NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
         ).unwrap().presetCfg;
         enc_conf.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+        enc_conf.rcParams.maxBitRate = 12 << 20;
         enc_conf.rcParams.averageBitRate = 8 << 20;
         enc_conf.rcParams.multiPass = NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
         enc_conf.rcParams.lowDelayKeyFrameScale = 0;
