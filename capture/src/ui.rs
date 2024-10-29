@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use log::{info, Level};
+use log::Level;
 
 use ratatui::{
     crossterm::{

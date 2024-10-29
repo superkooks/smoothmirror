@@ -11,6 +11,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
+use egui_glium::{egui_winit::egui::ViewportId, EguiGlium};
 use gilrs::Gilrs;
 use glium::{
     backend::winit::{
@@ -27,12 +28,15 @@ use glium::{
     winit::{
         application::ApplicationHandler,
         event::{ElementState, MouseButton},
+        keyboard::KeyCode,
     },
     Display, Surface,
 };
 use serde::{Deserialize, Serialize};
+use ui::Ui;
 
 mod client;
+mod ui;
 
 const ENCODED_WIDTH: u32 = 2560;
 const ENCODED_HEIGHT: u32 = 1440;
@@ -56,10 +60,17 @@ struct AppDisplay {
     program: glium::Program,
 
     tredraw: Instant,
+    ui: Ui,
 }
 
 impl AppDisplay {
-    fn new(window: Window, display: Display<WindowSurface>, tcp_sock: TcpStream) -> Self {
+    fn new(
+        window: Window,
+        display: Display<WindowSurface>,
+        tcp_sock: TcpStream,
+        egui_glium: EguiGlium,
+        volume: Arc<Mutex<f32>>,
+    ) -> Self {
         let texture = glium::Texture2d::empty(&display, ENCODED_WIDTH, ENCODED_HEIGHT).unwrap();
 
         let program = glium::Program::from_source(
@@ -79,6 +90,12 @@ impl AppDisplay {
             program,
 
             tredraw: Instant::now(),
+            ui: Ui {
+                egui_glium,
+                open: true,
+                volume,
+                quit: false,
+            },
         }
     }
 }
@@ -125,18 +142,37 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                 WindowEvent::Resized(_) => {}
                 WindowEvent::KeyboardInput {
                     device_id: _,
-                    event,
+                    event: ref kevent,
                     is_synthetic: _,
                 } => {
-                    println!("got keyboard event {:?}", event.physical_key);
-                    let key_text = event.logical_key.to_text();
+                    println!("got keyboard event {:?}", kevent.physical_key);
+                    match kevent.physical_key {
+                        glium::winit::keyboard::PhysicalKey::Code(KeyCode::F7) => {
+                            if kevent.state != ElementState::Released {
+                                return;
+                            }
+
+                            self.ui.open = !self.ui.open;
+                            self.window.set_cursor_visible(self.ui.open);
+
+                            return;
+                        }
+                        _ => {}
+                    }
+
+                    if self.ui.open {
+                        let _ = self.ui.egui_glium.on_event(&self.window, &event);
+                        return;
+                    }
+
+                    let key_text = kevent.logical_key.to_text();
                     match key_text {
                         Some(t) => {
                             self.tcp_sock
                                 .write(
                                     &rmp_serde::to_vec(&KeyEvent::Key {
                                         letter: t.chars().nth(0).unwrap(),
-                                        state: match event.state {
+                                        state: match kevent.state {
                                             ElementState::Pressed => true,
                                             ElementState::Released => false,
                                         },
@@ -152,6 +188,11 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                     device_id: _,
                     position,
                 } => {
+                    if self.ui.open {
+                        let _ = self.ui.egui_glium.on_event(&self.window, &event);
+                        return;
+                    }
+
                     let size = self.window.inner_size();
 
                     // Send the delta position
@@ -175,6 +216,11 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                     state,
                     button,
                 } => {
+                    if self.ui.open {
+                        let _ = self.ui.egui_glium.on_event(&self.window, &event);
+                        return;
+                    }
+
                     let but = match button {
                         MouseButton::Left => 0,
                         MouseButton::Middle => 1,
@@ -194,6 +240,11 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    if self.ui.quit {
+                        event_loop.exit();
+                        return;
+                    }
+
                     println!(
                         "redrawing after {} us",
                         Instant::now().duration_since(self.tredraw).as_micros()
@@ -215,6 +266,9 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                             &glium::DrawParameters::default(),
                         )
                         .unwrap();
+
+                    self.ui.redraw(&self.window, &self.display, &mut target);
+
                     target.finish().unwrap();
                 }
                 _ => {}
@@ -230,6 +284,9 @@ fn main() {
     let decoded_audio = Arc::new(Mutex::new(vec![]));
     let decoded_audio_cb = decoded_audio.clone();
 
+    let volume = Arc::new(Mutex::new(100.0f32));
+    let volume_cb = volume.clone();
+
     let stream = device
         .build_output_stream(
             &StreamConfig {
@@ -239,8 +296,15 @@ fn main() {
             },
             move |data: &mut [f32], &_| {
                 if decoded_audio_cb.lock().unwrap().len() >= data.len() {
-                    data.copy_from_slice(&decoded_audio_cb.lock().unwrap()[0..data.len()]);
+                    let volume_guard = volume_cb.lock().unwrap();
+                    println!("volume {}", *volume_guard / 100.);
+                    let decoded: Vec<f32> = decoded_audio_cb.lock().unwrap()[0..data.len()]
+                        .iter()
+                        .map(|x| x * (*volume_guard) / 100.)
+                        .collect();
+
                     decoded_audio_cb.lock().unwrap().drain(0..data.len());
+                    data.copy_from_slice(&decoded);
                 } else {
                     data.fill(Sample::EQUILIBRIUM);
                 }
@@ -262,7 +326,8 @@ fn main() {
         .build(&event_loop);
 
     window.set_resizable(false);
-    window.set_cursor_visible(false);
+
+    let egui_glium = egui_glium::EguiGlium::new(ViewportId::ROOT, &display, &window, &event_loop);
 
     let mut c = init_client(decoded_audio, event_loop.create_proxy());
 
@@ -317,7 +382,7 @@ fn main() {
         }
     });
 
-    let mut d = AppDisplay::new(window, display, tcp_sock);
+    let mut d = AppDisplay::new(window, display, tcp_sock, egui_glium, volume);
 
     // let mut video_stream = TcpStream::connect("localhost:9999").unwrap();
 

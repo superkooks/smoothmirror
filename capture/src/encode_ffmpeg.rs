@@ -1,4 +1,4 @@
-use std::{ffi::CString, time::Instant};
+use std::ffi::CString;
 
 use ffmpeg_sys_next as ffmpeg;
 
@@ -53,7 +53,6 @@ impl VideoEncoder {
     }
 
     pub fn capture_and_encode(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
-        let t = Instant::now();
         let (image, mut f) = self.capturer.capture_frame();
 
         // Allocate the RGB frame for the converted image

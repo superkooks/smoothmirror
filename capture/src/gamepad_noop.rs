@@ -7,5 +7,5 @@ impl GamepadEmulator {
         Self {}
     }
 
-    pub fn send_gamepad_event(&mut self, ev: KeyEvent) {}
+    pub fn send_gamepad_event(&mut self, _ev: KeyEvent) {}
 }
