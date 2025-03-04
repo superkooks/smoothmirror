@@ -7,15 +7,14 @@ use std::{
 };
 
 use client::init_client;
+use common::chan;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
 };
 use egui_glium::{egui_winit::egui::ViewportId, EguiGlium};
-use gilrs::Gilrs;
 use glium::{
     backend::winit::{
-        dpi::PhysicalPosition,
         event::WindowEvent,
         event_loop::{ControlFlow, EventLoop},
         window::Window,
@@ -27,8 +26,9 @@ use glium::{
     vertex::VerticesSource,
     winit::{
         application::ApplicationHandler,
-        event::{ElementState, MouseButton},
+        event::{DeviceEvent, ElementState, MouseButton},
         keyboard::KeyCode,
+        window::CursorGrabMode,
     },
     Display, Surface,
 };
@@ -42,17 +42,18 @@ const ENCODED_WIDTH: u32 = 2560;
 const ENCODED_HEIGHT: u32 = 1440;
 const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 
+// If you are experiencing packet loss on linux, you may need to increase you udp buffer size
+// sudo sysctl -w net.core.rmem_max=20000000
+
 #[derive(Serialize, Deserialize)]
 enum KeyEvent {
     Key { letter: char, state: bool },
     Mouse { x: f64, y: f64 },
     Click { button: i32, state: bool },
-    GamepadButton { button: gilrs::Button, state: u8 },
-    GamepadAxis { axis: gilrs::Axis, state: f32 },
 }
 
 struct AppDisplay {
-    tcp_sock: TcpStream,
+    key_chan: chan::SubChan,
     window: Window,
     display: Display<WindowSurface>,
 
@@ -67,7 +68,7 @@ impl AppDisplay {
     fn new(
         window: Window,
         display: Display<WindowSurface>,
-        tcp_sock: TcpStream,
+        key_chan: chan::SubChan,
         egui_glium: EguiGlium,
         volume: Arc<Mutex<f32>>,
     ) -> Self {
@@ -84,7 +85,7 @@ impl AppDisplay {
         AppDisplay {
             window,
             display,
-            tcp_sock,
+            key_chan,
 
             texture,
             program,
@@ -153,7 +154,19 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                             }
 
                             self.ui.open = !self.ui.open;
+
+                            // Lock and hide the cursor, or inverse
                             self.window.set_cursor_visible(self.ui.open);
+                            if self.ui.open {
+                                self.window.set_cursor_grab(CursorGrabMode::None).unwrap();
+                            } else {
+                                self.window
+                                    .set_cursor_grab(CursorGrabMode::Confined)
+                                    .or_else(|_e| {
+                                        self.window.set_cursor_grab(CursorGrabMode::Locked)
+                                    })
+                                    .unwrap();
+                            }
 
                             return;
                         }
@@ -168,8 +181,8 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                     let key_text = kevent.logical_key.to_text();
                     match key_text {
                         Some(t) => {
-                            self.tcp_sock
-                                .write(
+                            self.key_chan
+                                .write_all(
                                     &rmp_serde::to_vec(&KeyEvent::Key {
                                         letter: t.chars().nth(0).unwrap(),
                                         state: match kevent.state {
@@ -183,33 +196,6 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                         }
                         None => {}
                     }
-                }
-                WindowEvent::CursorMoved {
-                    device_id: _,
-                    position,
-                } => {
-                    if self.ui.open {
-                        let _ = self.ui.egui_glium.on_event(&self.window, &event);
-                        return;
-                    }
-
-                    let size = self.window.inner_size();
-
-                    // Send the delta position
-                    self.tcp_sock
-                        .write(
-                            &rmp_serde::to_vec(&KeyEvent::Mouse {
-                                x: position.x - size.width as f64 / 2.,
-                                y: position.y - size.height as f64 / 2.,
-                            })
-                            .unwrap(),
-                        )
-                        .unwrap();
-
-                    // Reset the position of the mouse to the centre
-                    self.window
-                        .set_cursor_position(PhysicalPosition::new(size.width / 2, size.height / 2))
-                        .unwrap();
                 }
                 WindowEvent::MouseInput {
                     device_id: _,
@@ -228,8 +214,8 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                         _ => 3,
                     };
                     if but < 3 {
-                        self.tcp_sock
-                            .write(
+                        self.key_chan
+                            .write_all(
                                 &rmp_serde::to_vec(&KeyEvent::Click {
                                     button: but,
                                     state: state.is_pressed(),
@@ -237,6 +223,14 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                                 .unwrap(),
                             )
                             .unwrap();
+                    }
+                }
+                WindowEvent::CursorMoved {
+                    device_id: _,
+                    position: _,
+                } => {
+                    if self.ui.open {
+                        let _ = self.ui.egui_glium.on_event(&self.window, &event);
                     }
                 }
                 WindowEvent::RedrawRequested => {
@@ -273,6 +267,31 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &glium::winit::event_loop::ActiveEventLoop,
+        _device_id: glium::winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        match event {
+            DeviceEvent::MouseMotion { delta } => {
+                if !self.ui.open {
+                    // Send the delta position
+                    self.key_chan
+                        .write_all(
+                            &rmp_serde::to_vec(&KeyEvent::Mouse {
+                                x: delta.0,
+                                y: delta.1,
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -332,60 +351,26 @@ fn main() {
     let mut c = init_client(decoded_audio, event_loop.create_proxy());
 
     let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
-    let cts = tcp_sock.try_clone().unwrap();
-    let mut gts = tcp_sock.try_clone().unwrap();
+    let mut master_chan = chan::TcpChan::new(tcp_sock);
+
+    // Create thread to read udp and decode frames
     thread::spawn(move || {
         c.init();
-        c.run(cts)
+        c.run()
     });
 
-    thread::spawn(move || {
-        let mut gilrs = Gilrs::new().unwrap();
-        loop {
-            while let Some(ev) = gilrs.next_event() {
-                match ev.event {
-                    gilrs::EventType::ButtonPressed(button, _code) => {
-                        gts.write(
-                            &rmp_serde::to_vec(&KeyEvent::GamepadButton { button, state: 1 })
-                                .unwrap(),
-                        )
-                        .unwrap();
-                    }
-                    gilrs::EventType::ButtonReleased(button, _code) => {
-                        gts.write(
-                            &rmp_serde::to_vec(&KeyEvent::GamepadButton { button, state: 0 })
-                                .unwrap(),
-                        )
-                        .unwrap();
-                    }
-                    gilrs::EventType::ButtonChanged(button, state, _code) => {
-                        let axis = match button {
-                            gilrs::Button::LeftTrigger2 => gilrs::Axis::LeftZ,
-                            gilrs::Button::RightTrigger2 => gilrs::Axis::RightZ,
-                            _ => gilrs::Axis::Unknown,
-                        };
-                        gts.write(
-                            &rmp_serde::to_vec(&KeyEvent::GamepadAxis { axis, state }).unwrap(),
-                        )
-                        .unwrap();
-                    }
-                    gilrs::EventType::AxisChanged(axis, state, _code) => {
-                        gts.write(
-                            &rmp_serde::to_vec(&KeyEvent::GamepadAxis { axis, state }).unwrap(),
-                        )
-                        .unwrap();
-                    }
-                    _ => {}
-                };
-                // println!("{:?} New event from {}: {:?}", time, id, event);
-            }
-        }
-    });
+    // Create instance to display frames and capture events
+    let mut d = AppDisplay::new(
+        window,
+        display,
+        master_chan.create_subchan(chan::ChannelId::Keys),
+        egui_glium,
+        volume,
+    );
 
-    let mut d = AppDisplay::new(window, display, tcp_sock, egui_glium, volume);
+    // Start networking channel to forward key events back to capture client
+    master_chan.start_rw();
 
-    // let mut video_stream = TcpStream::connect("localhost:9999").unwrap();
-
-    // Run the event loop
+    // Run its event loop
     event_loop.run_app(&mut d).unwrap();
 }

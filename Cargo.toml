@@ -1,5 +1,5 @@
 [workspace]
-members = ["capture", "display", "repeat"]
+members = ["capture", "common", "display", "repeat"]
 resolver = "2"
 
 # Make the default dev profile the same as release

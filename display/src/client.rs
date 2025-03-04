@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -167,7 +167,7 @@ impl Client {
         self.ff = Some(FFMPEGLater { decoder, parser });
     }
 
-    pub fn run(&mut self, tcp_sock: TcpStream) {
+    pub fn run(&mut self) {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
 
         #[cfg(not(target_os = "macos"))]
@@ -180,8 +180,6 @@ impl Client {
         sock.connect("dw.superkooks.com:42069").unwrap();
         sock.send(&vec![1]).unwrap();
         sock.recv(&mut vec![0]).unwrap();
-
-        tcp_sock.set_nodelay(true).unwrap();
 
         let mut udp_stream = UdpStream::new();
 

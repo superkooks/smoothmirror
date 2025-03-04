@@ -11,19 +11,13 @@ mod audio_capture;
 #[cfg_attr(target_os = "windows", path = "capture_windows.rs")]
 mod video_capture;
 
-#[cfg(all(not(target_os = "linux"), feature = "gamepad_emulation"))]
-compile_error!("cannot compile with gamepad emulation for non-linux targets");
-
-#[cfg_attr(feature = "gamepad_emulation", path = "gamepad_linux.rs")]
-#[cfg_attr(not(feature = "gamepad_emulation"), path = "gamepad_noop.rs")]
-mod gamepad;
-
 mod udp;
 
 #[cfg_attr(feature = "nvenc", path = "encode_nvidia.rs")]
 #[cfg_attr(not(feature = "nvenc"), path = "encode_ffmpeg.rs")]
 mod video_encode;
 
+use common::chan;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep, sleep_until};
@@ -32,7 +26,6 @@ use std::time::{Duration, Instant};
 use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
 
-use gamepad::GamepadEmulator;
 use log::info;
 use serde::{Deserialize, Serialize};
 use udp::{Msg, UdpStream};
@@ -52,9 +45,6 @@ enum KeyEvent {
     Key { letter: char, state: bool },
     Mouse { x: f64, y: f64 },
     Click { button: i32, state: bool },
-    GamepadButton { button: gilrs::Button, state: u8 },
-    GamepadAxis { axis: gilrs::Axis, state: f32 },
-    Nack { seq: i64 },
 }
 
 pub struct Capturer {
@@ -75,8 +65,6 @@ fn main() {
     let (ui, ui_thread) = ui::start_ui();
     log::set_boxed_logger(Box::new(ui::Logger(ui.clone()))).unwrap();
     log::set_max_level(log::LevelFilter::Info);
-
-    let mut gpe = GamepadEmulator::new();
 
     let mut enc = new_encoder();
     info!("waiting for a display client");
@@ -101,8 +89,10 @@ fn main() {
 
     let ustream = Arc::new(Mutex::new(UdpStream::new(sock)));
 
-    let mut tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
-    tcp_sock.set_nodelay(true).unwrap();
+    let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
+    let mut master_chan = chan::TcpChan::new(tcp_sock);
+    let mut key_chan = master_chan.create_subchan(chan::ChannelId::Keys);
+    master_chan.start_rw();
 
     // Forward keyboard events to application
     thread::spawn(move || {
@@ -110,7 +100,7 @@ fn main() {
         // let mut t = Instant::now();
 
         loop {
-            let ev = rmp_serde::from_read::<&mut TcpStream, KeyEvent>(&mut tcp_sock).unwrap();
+            let ev = rmp_serde::from_read(&mut key_chan).unwrap();
             match ev {
                 KeyEvent::Key { letter, state } => {
                     enigo
@@ -150,13 +140,11 @@ fn main() {
                         .move_mouse(x as i32, y as i32, enigo::Coordinate::Rel)
                         .unwrap();
                 }
-                _ => {
-                    gpe.send_gamepad_event(ev);
-                }
             }
         }
     });
 
+    // Spawn thread to read nacks
     let kustream = ustream.clone();
     thread::spawn(move || loop {
         let mut buf = vec![0; 2048];
@@ -165,9 +153,6 @@ fn main() {
         let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
         kustream.lock().unwrap().process_nack(msg.seq);
     });
-
-    // let mut socket = TcpListener::bind("localhost:9999").unwrap();
-    // let mut conn = socket.accept().unwrap().0;
 
     sleep(Duration::from_millis(100));
     info!("got display client");
