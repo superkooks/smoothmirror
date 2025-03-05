@@ -7,7 +7,7 @@ use std::{
 };
 
 use client::init_client;
-use common::chan;
+use common::{chan, portforward::PortForwarder};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
@@ -53,7 +53,7 @@ enum KeyEvent {
 }
 
 struct AppDisplay {
-    key_chan: chan::SubChan,
+    key_chan: chan::SubChanWriter,
     window: Window,
     display: Display<WindowSurface>,
 
@@ -68,7 +68,7 @@ impl AppDisplay {
     fn new(
         window: Window,
         display: Display<WindowSurface>,
-        key_chan: chan::SubChan,
+        key_chan: chan::SubChanWriter,
         egui_glium: EguiGlium,
         volume: Arc<Mutex<f32>>,
     ) -> Self {
@@ -351,7 +351,9 @@ fn main() {
     let mut c = init_client(decoded_audio, event_loop.create_proxy());
 
     let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
-    let mut master_chan = chan::TcpChan::new(tcp_sock);
+    let master_chan = Arc::new(Mutex::new(chan::TcpChan::new(tcp_sock)));
+    let portforwarder = PortForwarder::new(master_chan.clone());
+    portforwarder.listen_and_forward("127.0.0.1:7800".parse().unwrap(), "google.com:80".into());
 
     // Create thread to read udp and decode frames
     thread::spawn(move || {
@@ -363,13 +365,14 @@ fn main() {
     let mut d = AppDisplay::new(
         window,
         display,
-        master_chan.create_subchan(chan::ChannelId::Keys),
+        master_chan
+            .lock()
+            .unwrap()
+            .create_subchan(chan::ChannelId::Keys)
+            .0,
         egui_glium,
         volume,
     );
-
-    // Start networking channel to forward key events back to capture client
-    master_chan.start_rw();
 
     // Run its event loop
     event_loop.run_app(&mut d).unwrap();

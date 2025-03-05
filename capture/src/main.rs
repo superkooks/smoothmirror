@@ -18,6 +18,7 @@ mod udp;
 mod video_encode;
 
 use common::chan;
+use common::portforward::PortForwarder;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep, sleep_until};
@@ -90,9 +91,13 @@ fn main() {
     let ustream = Arc::new(Mutex::new(UdpStream::new(sock)));
 
     let tcp_sock = TcpStream::connect("dw.superkooks.com:42069").unwrap();
-    let mut master_chan = chan::TcpChan::new(tcp_sock);
-    let mut key_chan = master_chan.create_subchan(chan::ChannelId::Keys);
-    master_chan.start_rw();
+    let master_chan = Arc::new(Mutex::new(chan::TcpChan::new(tcp_sock)));
+    let mut key_chan = master_chan
+        .lock()
+        .unwrap()
+        .create_subchan(chan::ChannelId::Keys)
+        .1;
+    let portforwarder = PortForwarder::new(master_chan.clone());
 
     // Forward keyboard events to application
     thread::spawn(move || {
