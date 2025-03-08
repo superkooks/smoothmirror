@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum ChannelId {
+    // Inter-client protocol
     Keys,
     PortForwardControl,
     PortForwardSub(u64),
+
+    // Internal client IPC protocol
+    IPC,
 }
 
 #[derive(Serialize, Deserialize)]

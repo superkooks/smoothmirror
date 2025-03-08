@@ -36,11 +36,16 @@ use serde::{Deserialize, Serialize};
 use ui::Ui;
 
 mod client;
+mod priveleged;
 mod ui;
+mod usb;
 
-const ENCODED_WIDTH: u32 = 2560;
-const ENCODED_HEIGHT: u32 = 1440;
-const FRAME_DURATION: Duration = Duration::from_micros(16_666);
+// const ENCODED_WIDTH: u32 = 2560;
+// const ENCODED_HEIGHT: u32 = 1440;
+const ENCODED_WIDTH: u32 = 2256;
+const ENCODED_HEIGHT: u32 = 1504;
+// const FRAME_DURATION: Duration = Duration::from_micros(16_666);
+const FRAME_DURATION: Duration = Duration::from_micros(100_000);
 
 // If you are experiencing packet loss on linux, you may need to increase you udp buffer size
 // sudo sysctl -w net.core.rmem_max=20000000
@@ -297,6 +302,15 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
 }
 
 fn main() {
+    // Check whether this is a spawned priveleged process
+    if std::env::args().nth(1).unwrap_or_default() == "priveleged" {
+        simple_logging::log_to_file("z.log", log::LevelFilter::Trace).unwrap();
+        priveleged::priveleged_entrypoint();
+    }
+
+    let mut ipc_writer = priveleged::start_priveleged_process();
+    usb::start_usbip_server(ipc_writer.as_mut());
+
     // Create audio stream on main thread
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
