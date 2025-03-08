@@ -7,7 +7,14 @@ mod ui;
 #[cfg_attr(target_os = "windows", path = "audio_windows.rs")]
 mod audio_capture;
 
-#[cfg_attr(target_os = "linux", path = "capture_linux.rs")]
+#[cfg_attr(
+    all(target_os = "linux", feature = "wayland"),
+    path = "capture_wayland.rs"
+)]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "wayland")),
+    path = "capture_x11.rs"
+)]
 #[cfg_attr(target_os = "windows", path = "capture_windows.rs")]
 mod video_capture;
 
@@ -33,11 +40,15 @@ use udp::{Msg, UdpStream};
 use ui::FrameLatencyInfo;
 use video_encode::VideoEncoder;
 
-const FRAME_DURATION: Duration = Duration::from_micros(16_666);
-const FRAME_RATE: u32 = 60;
+// const FRAME_DURATION: Duration = Duration::from_micros(16_666);
+// const FRAME_RATE: u32 = 60;
+const FRAME_DURATION: Duration = Duration::from_micros(100_000);
+const FRAME_RATE: u32 = 10;
 
-const CAPTURE_WIDTH: u32 = 2560;
-const CAPTURE_HEIGHT: u32 = 1440;
+// const CAPTURE_WIDTH: u32 = 2560;
+// const CAPTURE_HEIGHT: u32 = 1440;
+const CAPTURE_WIDTH: u32 = 2256;
+const CAPTURE_HEIGHT: u32 = 1504;
 const CAPTURE_OFFSET_X: u32 = 3840;
 const CAPTURE_OFFSET_Y: u32 = 240;
 
@@ -98,6 +109,7 @@ fn main() {
         .create_subchan(chan::ChannelId::Keys)
         .1;
     let portforwarder = PortForwarder::new(master_chan.clone());
+    portforwarder.listen_and_forward("127.0.0.1:3240".parse().unwrap(), "127.0.0.1:3240".into());
 
     // Forward keyboard events to application
     thread::spawn(move || {

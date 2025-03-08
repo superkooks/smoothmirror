@@ -54,6 +54,9 @@ impl VideoEncoder {
 
     pub fn capture_and_encode(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
         let (image, mut f) = self.capturer.capture_frame();
+        if image.len() == 0 {
+            return (vec![], f);
+        }
 
         // Allocate the RGB frame for the converted image
         let mut yuv_frame = unsafe { ffmpeg::av_frame_alloc() };

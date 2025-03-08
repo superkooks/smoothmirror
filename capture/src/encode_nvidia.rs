@@ -79,6 +79,9 @@ impl VideoEncoder {
     pub fn capture_and_encode(&mut self) -> (Vec<u8>, FrameLatencyInfo) {
         // Capture the image
         let (image, mut f) = self.capturer.capture_frame();
+        if image.len() == 0 {
+            return (vec![], f);
+        }
 
         // Encode the image, writing potentially multiple nalus
         unsafe { self.in_buf.as_mut().unwrap().lock().unwrap().write(&image) };
