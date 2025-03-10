@@ -12,15 +12,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install x264
+    - name: Install ffmpeg
       run: |
-        brew install x264
-
-    - name: Get ffmpeg libraries
-      run: |
-        mkdir ffmpeg && cd ffmpeg
-        wget https://github.com/ColorsWind/FFmpeg-macOS/releases/download/n5.0.1-patch3/FFmpeg-shared-n5.0.1-OSX-universal.zip -O ffmpeg.zip
-        unzip ffmpeg.zip
+        brew tap-new superkooks/prospectivegopher
+        cp build-mac/ffmpeg.rb $(brew --repo superkooks/prospectivegopher)/Formula/
+        brew install -s superkooks/prospectivegopher/ffmpeg
 
     - name: Install rust nightly
       run: |
@@ -29,7 +25,6 @@ jobs:
       
     - name: Build display
       run: |
-        export FFMPEG_DIR=$(pwd)/ffmpeg
         cargo build --verbose --bin display
 
     - uses: actions/upload-artifact@v4
@@ -63,6 +58,7 @@ jobs:
 
     - name: Install rust nightly
       run: |
+        rustup set auto-self-update disable
         rustup toolchain install nightly
         rustup default nightly
 

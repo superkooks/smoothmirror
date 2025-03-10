@@ -2990,6 +2990,7 @@ dependencies = [
 [[package]]
 name = "usbip"
 version = "0.7.1"
+source = "git+https://github.com/superkooks/usbip.git?branch=fixes#b83b3fe92a942cd9fdc4ed25fbf1253d1ba58041"
 dependencies = [
  "log",
  "num-derive 0.3.3",
