@@ -35,3 +35,4 @@ ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ffmpeg-sys-next = { version = "7.0.2", features = ["static"] }
+wdi = { git = "https://github.com/blackmagic-debug/wdi-rs" }

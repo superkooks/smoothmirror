@@ -56,6 +56,18 @@ jobs:
       run: |
         vcpkg install ffmpeg[core,avcodec,avformat,avfilter,avdevice,swresample,swscale,x264]:x64-windows-static-md
 
+    - name: Download and install Windows Driver Kit
+      run: |
+        Invoke-WebRequest -Uri "https://download.microsoft.com/download/0/5/F/05FD6919-6250-425B-86ED-9B095E54065A/wdfcoinstaller.msi" -OutFile wdfcoinstaller.msi
+        & msiexec.exe /qn /passive /i wdfcoinstaller.msi
+        $file = "wdfcoinstaller.msi"
+        $log = "install.log" 
+        $procMain = Start-Process "msiexec" "/i `"$file`" /qn /l*! `"$log`"" -NoNewWindow -PassThru
+        Start-Sleep -Seconds 3
+        $procLog = Start-Process "powershell" "Get-Content -Path `"$log`" -Wait" -NoNewWindow -PassThru
+        $procMain.WaitForExit() 
+        $procLog.Kill()
+
     - name: Install rust nightly
       run: |
         rustup set auto-self-update disable

@@ -304,7 +304,6 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
 fn main() {
     // Check whether this is a spawned priveleged process
     if std::env::args().nth(1).unwrap_or_default() == "priveleged" {
-        simple_logging::log_to_file("z.log", log::LevelFilter::Trace).unwrap();
         priveleged::priveleged_entrypoint();
     }
 
