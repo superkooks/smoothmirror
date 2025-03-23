@@ -14,9 +14,9 @@ jobs:
 
     - name: Install ffmpeg
       run: |
-        brew tap-new superkooks/prospectivegopher
-        cp build-mac/ffmpeg.rb $(brew --repo superkooks/prospectivegopher)/Formula/
-        brew install -s superkooks/prospectivegopher/ffmpeg
+        brew tap-new superkooks/smoothmirror
+        cp build-mac/ffmpeg.rb $(brew --repo superkooks/smoothmirror)/Formula/
+        brew install -s superkooks/smoothmirror/ffmpeg
 
     - name: Install rust nightly
       run: |

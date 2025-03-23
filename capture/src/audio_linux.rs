@@ -27,7 +27,7 @@ impl AudioCapturer {
             pulse::mainloop::standard::Mainloop::new().unwrap(),
         ));
         let ctx = Rc::new(RefCell::new(
-            pulse::context::Context::new(mainloop.borrow().deref(), "prospectivegopher").unwrap(),
+            pulse::context::Context::new(mainloop.borrow().deref(), "smoothmirror").unwrap(),
         ));
 
         // Connect to pulseaudio
