@@ -7,7 +7,7 @@ use std::{
 };
 
 use client::init_client;
-use common::{chan, portforward::PortForwarder};
+use common::{chan, msgs::KeyEvent, portforward::PortForwarder};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Sample, SampleRate, StreamConfig,
@@ -32,7 +32,6 @@ use glium::{
     },
     Display, Surface,
 };
-use serde::{Deserialize, Serialize};
 use ui::Ui;
 
 mod client;
@@ -40,22 +39,15 @@ mod priveleged;
 mod ui;
 mod usb;
 
-// const ENCODED_WIDTH: u32 = 2560;
-// const ENCODED_HEIGHT: u32 = 1440;
-const ENCODED_WIDTH: u32 = 2256;
-const ENCODED_HEIGHT: u32 = 1504;
+const ENCODED_WIDTH: u32 = 2560;
+const ENCODED_HEIGHT: u32 = 1440;
+// const ENCODED_WIDTH: u32 = 2256;
+// const ENCODED_HEIGHT: u32 = 1504;
 // const FRAME_DURATION: Duration = Duration::from_micros(16_666);
 const FRAME_DURATION: Duration = Duration::from_micros(100_000);
 
 // If you are experiencing packet loss on linux, you may need to increase you udp buffer size
 // sudo sysctl -w net.core.rmem_max=20000000
-
-#[derive(Serialize, Deserialize)]
-enum KeyEvent {
-    Key { letter: char, state: bool },
-    Mouse { x: f64, y: f64 },
-    Click { button: i32, state: bool },
-}
 
 struct AppDisplay {
     key_chan: chan::SubChanWriter,
@@ -183,6 +175,7 @@ impl ApplicationHandler<Vec<u8>> for AppDisplay {
                         return;
                     }
 
+                    // TODO Accept all key events
                     let key_text = kevent.logical_key.to_text();
                     match key_text {
                         Some(t) => {
@@ -308,6 +301,8 @@ fn main() {
     }
 
     let mut ipc_writer = priveleged::start_priveleged_process();
+
+    // TODO Ask user which device to share first
     usb::start_usbip_server(ipc_writer.as_mut());
 
     // Create audio stream on main thread

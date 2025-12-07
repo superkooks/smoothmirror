@@ -4,22 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::{Deserialize, Serialize};
+use common::msgs::RTMsg;
 
 const UDP_HISTORY: Duration = Duration::from_millis(1000);
 
-#[derive(Serialize, Deserialize)]
-pub struct Msg {
-    pub seq: i64,
-    pub is_audio: bool,
-
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
-}
-
 pub struct UdpStream {
     sock: UdpSocket,
-    history: VecDeque<(Msg, Instant)>,
+    history: VecDeque<(RTMsg, Instant)>,
 
     cur_seq: i64,
 }
@@ -35,7 +26,7 @@ impl UdpStream {
 
     pub fn send_packet(&mut self, data: Vec<u8>, is_audio: bool) {
         // Create msg struct and increment seq numbers
-        let msg = Msg {
+        let msg = RTMsg {
             seq: self.cur_seq,
             is_audio,
             data,

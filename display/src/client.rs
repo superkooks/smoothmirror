@@ -5,9 +5,9 @@ use std::{
 };
 
 use audiopus::{packet::Packet, MutSignals};
+use common::msgs::RTMsg;
 use ffmpeg_sys_next::{self as ffmpeg};
 use glium::winit::event_loop::EventLoopProxy;
-use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::{ENCODED_HEIGHT, ENCODED_WIDTH, FRAME_DURATION};
@@ -193,7 +193,7 @@ impl Client {
             sock.recv(&mut buf).unwrap();
             t = Instant::now();
 
-            let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
+            let msg: RTMsg = rmp_serde::from_slice(&buf).unwrap();
             for msg in udp_stream.recv(msg, &mut sock) {
                 if msg.is_audio {
                     let mut output = vec![0f32; 1920 * 4];
@@ -216,19 +216,10 @@ impl Client {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Msg {
-    seq: i64,
-    is_audio: bool,
-
-    #[serde(with = "serde_bytes")]
-    data: Vec<u8>,
-}
-
 struct UdpStream {
     next_seq: i64,
     last_in_seq: Instant,
-    rearrange_buf: Vec<Msg>,
+    rearrange_buf: Vec<RTMsg>,
     nacked_seq: i64,
 }
 
@@ -242,7 +233,7 @@ impl UdpStream {
         };
     }
 
-    fn recv(&mut self, msg: Msg, udp_sock: &mut UdpSocket) -> Vec<Msg> {
+    fn recv(&mut self, msg: RTMsg, udp_sock: &mut UdpSocket) -> Vec<RTMsg> {
         let mut out = vec![];
 
         if Instant::now().duration_since(self.last_in_seq).as_micros()
@@ -262,7 +253,7 @@ impl UdpStream {
             for i in self.next_seq.max(self.nacked_seq)..msg.seq {
                 udp_sock
                     .send(
-                        &rmp_serde::to_vec(&Msg {
+                        &rmp_serde::to_vec(&RTMsg {
                             seq: i,
                             is_audio: false,
                             data: vec![],

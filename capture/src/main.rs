@@ -25,6 +25,7 @@ mod udp;
 mod video_encode;
 
 use common::chan;
+use common::msgs::{KeyEvent, RTMsg};
 use common::portforward::PortForwarder;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -35,8 +36,7 @@ use audio_encode::AudioEncoder;
 use enigo::{Enigo, Keyboard, Mouse, Settings};
 
 use log::info;
-use serde::{Deserialize, Serialize};
-use udp::{Msg, UdpStream};
+use udp::UdpStream;
 use ui::FrameLatencyInfo;
 use video_encode::VideoEncoder;
 
@@ -45,19 +45,12 @@ use video_encode::VideoEncoder;
 const FRAME_DURATION: Duration = Duration::from_micros(100_000);
 const FRAME_RATE: u32 = 10;
 
-// const CAPTURE_WIDTH: u32 = 2560;
-// const CAPTURE_HEIGHT: u32 = 1440;
-const CAPTURE_WIDTH: u32 = 2256;
-const CAPTURE_HEIGHT: u32 = 1504;
+const CAPTURE_WIDTH: u32 = 2560;
+const CAPTURE_HEIGHT: u32 = 1440;
+// const CAPTURE_WIDTH: u32 = 2256;
+// const CAPTURE_HEIGHT: u32 = 1504;
 const CAPTURE_OFFSET_X: u32 = 3840;
 const CAPTURE_OFFSET_Y: u32 = 240;
-
-#[derive(Serialize, Deserialize)]
-enum KeyEvent {
-    Key { letter: char, state: bool },
-    Mouse { x: f64, y: f64 },
-    Click { button: i32, state: bool },
-}
 
 pub struct Capturer {
     audio: AudioEncoder,
@@ -167,7 +160,7 @@ fn main() {
         let mut buf = vec![0; 2048];
         ksock.recv(&mut buf).unwrap();
 
-        let msg: Msg = rmp_serde::from_slice(&buf).unwrap();
+        let msg: RTMsg = rmp_serde::from_slice(&buf).unwrap();
         kustream.lock().unwrap().process_nack(msg.seq);
     });
 
